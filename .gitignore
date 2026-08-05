@@ -1,0 +1,17 @@
+# Secrets — never commit real credentials. Copy .env.example to .env instead.
+.env
+.env.*
+!.env.example
+
+# Build artifacts
+tmp/
+*.exe
+
+# Local databases
+*.db
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

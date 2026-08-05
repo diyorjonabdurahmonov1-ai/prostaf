@@ -1,0 +1,20 @@
+# Build artifacts
+tmp/
+*.exe
+
+# Dev tools
+.air.toml
+.vscode/
+.idea/
+
+# Git
+.git
+.gitignore
+
+# Docs
+README.md
+*.md
+
+# OS
+.DS_Store
+Thumbs.db

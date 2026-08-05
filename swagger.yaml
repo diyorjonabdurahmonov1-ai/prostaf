@@ -1,0 +1,1768 @@
+openapi: 3.0.3
+info:
+  title: PROSTAFF API
+  description: |
+    Multilingual marketplace connecting customers with daily workers and service companies.
+    Money is integer so'm (UZS). Timestamps are RFC 3339. IDs are UUID strings.
+  version: 1.0.0
+  contact:
+    name: PROSTAFF Team
+
+servers:
+  - url: https://prostaf.onrender.com/api/v1
+    description: Production
+  - url: http://localhost:8000/api/v1
+    description: Local development
+
+tags:
+  - name: Auth
+    description: OTP & admin authentication
+  - name: Me
+    description: Current user profile & settings
+  - name: Categories
+    description: Worker service categories (seeded)
+  - name: Worker
+    description: Worker profile & order management
+  - name: Company
+    description: Company profile & direct orders
+  - name: Orders
+    description: Customer order flow, matchmaking, invite
+  - name: Wallet
+    description: Balance & top-up
+  - name: Admin
+    description: Platform administration (requires admin role)
+  - name: Realtime
+    description: Server-Sent Events stream
+  - name: Health
+    description: Health check
+
+security:
+  - BearerAuth: []
+
+paths:
+  # ──────────────────────────── Auth ────────────────────────────
+  /auth/otp/request:
+    post:
+      tags: [Auth]
+      summary: Request OTP code
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+                  example: "+998901234567"
+      responses:
+        "200":
+          description: OTP sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent:
+                    type: boolean
+                  expires_in:
+                    type: integer
+                    description: How long the code stays valid, in seconds (120)
+                  dev_code:
+                    type: string
+                    description: Returned only in dev mode
+        "409":
+          description: The phone already has an account (no SMS is sent)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /auth/otp/verify:
+    post:
+      tags: [Auth]
+      summary: Verify OTP and get JWT
+      description: >
+        Creates the account when the phone is new. This is also the last step of
+        sign-up: proving the phone allows name and password to be set here.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone:
+                  type: string
+                code:
+                  type: string
+                name:
+                  type: string
+                  description: Set on the account when present
+                password:
+                  type: string
+                  description: Set on the account when present (6–72 characters)
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: A password was sent for a phone that already has an account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Phone + password login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, password]
+              properties:
+                phone:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: "Password reset step 1: send a code"
+      description: >
+        Sends a verification code by SMS. A password is never generated for the
+        user and never travels over SMS — the caller proves the phone at
+        /auth/forgot-password/verify and chooses the new password at
+        /auth/reset-password. The reply is identical whether or not the phone is
+        registered, so accounts cannot be enumerated.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone]
+              properties:
+                phone:
+                  type: string
+      responses:
+        "200":
+          description: Handled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent:
+                    type: boolean
+                  expires_in:
+                    type: integer
+                    description: How long the code stays valid, in seconds (120)
+                  dev_code:
+                    type: string
+                    description: Returned only in dev mode
+        "429":
+          $ref: "#/components/responses/TooManyRequests"
+
+  /auth/forgot-password/verify:
+    post:
+      tags: [Auth]
+      summary: "Password reset step 2: spend the code for a reset token"
+      description: >
+        The reset token authorises exactly one thing — setting a password. It is
+        not a session: every endpoint that takes a Bearer token rejects it.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [phone, code]
+              properties:
+                phone:
+                  type: string
+                code:
+                  type: string
+      responses:
+        "200":
+          description: Code accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  reset_token:
+                    type: string
+                  expires_in:
+                    type: integer
+                    description: Reset token TTL in seconds (600)
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: "Password reset step 3: choose the new password"
+      description: >
+        Sets the password and revokes every session that predates the reset.
+        Does not sign the caller in.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reset_token, password]
+              properties:
+                reset_token:
+                  type: string
+                password:
+                  type: string
+                  minLength: 6
+                  maxLength: 72
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/admin/login:
+    post:
+      tags: [Auth]
+      summary: Admin email + password login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  example: admin@prostaff.uz
+                password:
+                  type: string
+                  example: admin123
+      responses:
+        "200":
+          description: Admin login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "200":
+          description: Token refreshed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  refresh_token:
+                    type: string
+                  expires_in:
+                    type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke refresh token
+      security: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  # ──────────────────────────── Me ──────────────────────────────
+  /me:
+    get:
+      tags: [Me]
+      summary: Get current user (hydrated)
+      responses:
+        "200":
+          description: Current user with profiles and wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /me/push-token:
+    post:
+      tags: [Me]
+      summary: Set push notification token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token:
+                  type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/Ok"
+
+  /me/avatar:
+    post:
+      tags: [Me]
+      summary: Set avatar URL
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [avatar_url]
+              properties:
+                avatar_url:
+                  type: string
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /me/push-test:
+    post:
+      tags: [Me]
+      summary: Send a test push to the caller's own device
+      description: >
+        Sends a real Expo push to the token stored for this account and reports
+        what Expo answered. Always 200 — `sent` says whether it went out, and
+        `reason` says why not ("no_token" when the device never registered, e.g.
+        Expo Go, which has no remote push since SDK 53).
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title:
+                  type: string
+                body:
+                  type: string
+      responses:
+        "200":
+          description: Delivery attempt outcome
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sent:
+                    type: boolean
+                  reason:
+                    type: string
+                  error:
+                    type: string
+                  token:
+                    type: string
+                  tickets:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        status:
+                          type: string
+                          enum: [ok, error]
+                        id:
+                          type: string
+                        message:
+                          type: string
+
+  # ──────────────────────────── Uploads ─────────────────────────
+
+  /uploads:
+    post:
+      tags: [Me]
+      summary: Upload an image and get a URL every account can load
+      description: >
+        Accepts base64 bytes (bare, or a `data:` URI) and stores them. Profiles
+        keep the returned URL — a picker's local `file://` URI only resolves on
+        the device that chose the photo.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [data]
+              properties:
+                data:
+                  type: string
+                  description: Base64 payload, or a full `data:image/jpeg;base64,…` URI
+                mime:
+                  type: string
+                  default: image/jpeg
+                  enum: [image/jpeg, image/png, image/webp, image/heic]
+      responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  url:
+                    type: string
+        "400":
+          description: Not base64, empty, over 3 MB, or an unsupported mime type
+
+  /files/{id}:
+    get:
+      tags: [Me]
+      summary: Fetch an uploaded image
+      description: >
+        Public — an `<Image>` tag sends no Authorization header, so the
+        unguessable id is the capability.
+      security: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The image bytes
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: No such file
+
+  # ──────────────────────────── Categories ──────────────────────
+  /categories:
+    get:
+      tags: [Categories]
+      summary: List all categories
+      responses:
+        "200":
+          description: Category list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Category"
+
+  # ──────────────────────────── Notifications ───────────────────
+  /notifications:
+    get:
+      tags: [Me]
+      summary: List notifications
+      parameters:
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Only notifications after this timestamp
+      responses:
+        "200":
+          description: Notification list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Notification"
+
+  # ──────────────────────────── Worker ──────────────────────────
+  /worker/profile:
+    post:
+      tags: [Worker]
+      summary: Create worker profile (first-time)
+      description: Personal fields (full_name, phone, age) become read-only after creation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [full_name, phone, category_ids]
+              properties:
+                full_name:
+                  type: string
+                phone:
+                  type: string
+                gender:
+                  type: string
+                  enum: [male, female]
+                age:
+                  type: integer
+                price_min:
+                  type: integer
+                price_max:
+                  type: integer
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+                category_ids:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Worker profile created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerProfile"
+    patch:
+      tags: [Worker]
+      summary: Update worker profile (price + categories only)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                price_min:
+                  type: integer
+                price_max:
+                  type: integer
+                category_ids:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerProfile"
+
+  /worker/status:
+    post:
+      tags: [Worker]
+      summary: Toggle online/offline status
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [online]
+              properties:
+                online:
+                  type: boolean
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerProfile"
+
+  /worker/orders:
+    get:
+      tags: [Worker]
+      summary: Orders invited to or assigned to this worker
+      parameters:
+        - name: since
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Order list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+
+  /worker/orders/{id}/accept:
+    post:
+      tags: [Worker]
+      summary: Accept an order (deducts commission)
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Accepted order with revealed customer phone
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /worker/orders/{id}/reject:
+    post:
+      tags: [Worker]
+      summary: Reject an order invite
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Updated order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  # ──────────────────────────── Company ────────────────────────
+  /company/profile:
+    post:
+      tags: [Company]
+      summary: Create company profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                phone:
+                  type: string
+                description:
+                  type: string
+                images:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "201":
+          description: Company profile created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyProfile"
+    patch:
+      tags: [Company]
+      summary: Update company profile
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                images:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Updated company
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyProfile"
+
+  /company/status:
+    post:
+      tags: [Company]
+      summary: Toggle company online/offline
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [online]
+              properties:
+                online:
+                  type: boolean
+      responses:
+        "200":
+          description: Updated company
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyProfile"
+
+  /company/orders:
+    get:
+      tags: [Company]
+      summary: Company's incoming orders
+      responses:
+        "200":
+          description: Order list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+
+  /companies:
+    get:
+      tags: [Company]
+      summary: List online companies (public)
+      responses:
+        "200":
+          description: Company list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CompanyProfile"
+
+  /companies/{id}/order:
+    post:
+      tags: [Company]
+      summary: Direct order to a company
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [description]
+              properties:
+                description:
+                  type: string
+                phone:
+                  type: string
+      responses:
+        "201":
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  # ──────────────────────────── Orders ─────────────────────────
+  /orders:
+    post:
+      tags: [Orders]
+      summary: Create a new order
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category_id]
+              properties:
+                category_id:
+                  type: string
+                gender:
+                  type: string
+                  enum: [male, female, any]
+                  default: any
+                description:
+                  type: string
+                image_url:
+                  type: string
+                phone:
+                  type: string
+                lat:
+                  type: number
+                  format: double
+                lng:
+                  type: number
+                  format: double
+      responses:
+        "201":
+          description: Order created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+    get:
+      tags: [Orders]
+      summary: List caller's own orders
+      responses:
+        "200":
+          description: Order list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Order"
+
+  /orders/{id}:
+    get:
+      tags: [Orders]
+      summary: Get order by ID
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Order details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{id}/matches:
+    get:
+      tags: [Orders]
+      summary: Smart matchmaking (15 km radius)
+      description: Returns online workers matching the order's category within 15 km, sorted nearest first.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Matched workers with distance
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkerProfile"
+
+  /orders/{id}/invite:
+    post:
+      tags: [Orders]
+      summary: Invite workers (starts 120s timer)
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [worker_ids]
+              properties:
+                worker_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Worker profile IDs
+      responses:
+        "200":
+          description: Order with invited workers
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{id}/complete:
+    post:
+      tags: [Orders]
+      summary: Mark order as completed
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Completed order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{id}/cancel:
+    post:
+      tags: [Orders]
+      summary: Cancel an order
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Cancelled order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Order"
+
+  /orders/{id}/rate:
+    post:
+      tags: [Orders]
+      summary: Rate (two-way, direction inferred)
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [stars]
+              properties:
+                stars:
+                  type: integer
+                  minimum: 1
+                  maximum: 5
+                comment:
+                  type: string
+      responses:
+        "201":
+          description: Rating created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rating"
+
+  # ──────────────────────────── Wallet ─────────────────────────
+  /wallet:
+    get:
+      tags: [Wallet]
+      summary: Get wallet balance
+      responses:
+        "200":
+          description: Wallet snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Wallet"
+
+  /wallet/topup:
+    post:
+      tags: [Wallet]
+      summary: Top up wallet
+      description: In dev mode the amount is credited instantly.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, amount]
+              properties:
+                provider:
+                  type: string
+                  enum: [click, payme]
+                amount:
+                  type: integer
+                  description: Amount in so'm
+      responses:
+        "200":
+          description: Top-up result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  payment:
+                    $ref: "#/components/schemas/Payment"
+                  wallet:
+                    $ref: "#/components/schemas/Wallet"
+                  payment_url:
+                    type: string
+                    description: Provider checkout URL (production only)
+
+  # ──────────────────────────── Admin ──────────────────────────
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: List/search users
+      parameters:
+        - name: query
+          in: query
+          schema:
+            type: string
+          description: Search by phone or name
+      responses:
+        "200":
+          description: User list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+
+  /admin/users/{id}:
+    get:
+      tags: [Admin]
+      summary: Get user by ID (hydrated)
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Full user with profiles and wallet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    patch:
+      tags: [Admin]
+      summary: Update user fields
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                gmail:
+                  type: string
+                active:
+                  type: boolean
+                full_name:
+                  type: string
+                  description: Worker profile field
+                phone:
+                  type: string
+                  description: Worker profile field
+                age:
+                  type: integer
+                  description: Worker profile field
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /admin/users/{id}/roles:
+    post:
+      tags: [Admin]
+      summary: Add or remove a role
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role, action]
+              properties:
+                role:
+                  type: string
+                  enum: [customer, worker, company, admin]
+                action:
+                  type: string
+                  enum: [add, remove]
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  /admin/users/{id}/push:
+    post:
+      tags: [Admin]
+      summary: Send push notification to user
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, body]
+              properties:
+                title:
+                  type: string
+                body:
+                  type: string
+      responses:
+        "200":
+          description: Push sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                  notification:
+                    $ref: "#/components/schemas/Notification"
+
+  /admin/workers/{id}/ban:
+    post:
+      tags: [Admin]
+      summary: Ban a worker
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Banned worker profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerProfile"
+
+  /admin/workers/{id}/unban:
+    post:
+      tags: [Admin]
+      summary: Unban a worker
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Unbanned worker profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerProfile"
+
+  /admin/workers/{id}/credit-limit:
+    post:
+      tags: [Admin]
+      summary: Set worker credit limit
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount]
+              properties:
+                amount:
+                  type: integer
+      responses:
+        "200":
+          description: Updated worker profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkerProfile"
+
+  /admin/companies:
+    get:
+      tags: [Admin]
+      summary: List all companies
+      responses:
+        "200":
+          description: All companies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CompanyProfile"
+
+  /admin/companies/{id}/ban:
+    post:
+      tags: [Admin]
+      summary: Ban a company
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Banned company
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyProfile"
+
+  /admin/companies/{id}/unban:
+    post:
+      tags: [Admin]
+      summary: Unban a company
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Unbanned company
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyProfile"
+
+  /admin/companies/{id}:
+    patch:
+      tags: [Admin]
+      summary: Update company (admin)
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                description:
+                  type: string
+                images:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Updated company
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CompanyProfile"
+
+  /admin/analytics/orders:
+    get:
+      tags: [Admin]
+      summary: Order analytics by period
+      parameters:
+        - name: period
+          in: query
+          schema:
+            type: string
+            enum: [day, month, year]
+            default: day
+      responses:
+        "200":
+          description: Analytics data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Analytics"
+
+  /admin/finance:
+    get:
+      tags: [Admin]
+      summary: Finance overview
+      responses:
+        "200":
+          description: Finance data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Finance"
+
+  /admin/settings:
+    patch:
+      tags: [Admin]
+      summary: Update platform settings
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                commission_percent:
+                  type: integer
+                min_balance:
+                  type: integer
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
+
+  # ──────────────────────────── Realtime ───────────────────────
+  /events:
+    get:
+      tags: [Realtime]
+      summary: SSE event stream
+      description: |
+        Server-Sent Events stream. Each message: `data: {"type": "...", "data": {...}}`.
+        Server sends `:keepalive` comment every 20s.
+
+        Event types: `order.invite`, `order.accepted`, `order.expired`, `order.status`, `admin.push`
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+          description: JWT access token
+      responses:
+        "200":
+          description: SSE stream
+          content:
+            text/event-stream: {}
+
+  # ──────────────────────────── Health ─────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+
+# ════════════════════════════════════════════════════════════════
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    Ok:
+      description: Success
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              ok:
+                type: boolean
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    TooManyRequests:
+      description: SMS cooldown — one message per phone per 60 s
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+  schemas:
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+
+    AuthResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          description: Access token TTL in seconds
+        user:
+          $ref: "#/components/schemas/User"
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        phone:
+          type: string
+        gmail:
+          type: string
+        name:
+          type: string
+        avatar_url:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+            enum: [customer, worker, company, admin]
+        active:
+          type: boolean
+        push_token:
+          type: string
+        worker_profile:
+          $ref: "#/components/schemas/WorkerProfile"
+        company_profile:
+          $ref: "#/components/schemas/CompanyProfile"
+        wallet:
+          $ref: "#/components/schemas/Wallet"
+        created_at:
+          type: string
+          format: date-time
+
+    Category:
+      type: object
+      properties:
+        id:
+          type: string
+        key:
+          type: string
+        name_uz:
+          type: string
+        name_ru:
+          type: string
+        name_en:
+          type: string
+        icon:
+          type: string
+
+    WorkerProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        full_name:
+          type: string
+        phone:
+          type: string
+        gender:
+          type: string
+          enum: [male, female]
+        age:
+          type: integer
+        price_min:
+          type: integer
+        price_max:
+          type: integer
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        category_ids:
+          type: array
+          items:
+            type: string
+        online:
+          type: boolean
+        banned:
+          type: boolean
+        credit_limit:
+          type: integer
+        rating:
+          type: number
+          format: double
+        ratings_count:
+          type: integer
+        distance_km:
+          type: number
+          format: double
+          description: Present only in matchmaking results
+        avatar_url:
+          type: string
+          description: The worker's own photo, separate from the account avatar
+        about:
+          type: string
+          description: Short self-description shown on the public profile
+        experience_years:
+          type: integer
+        address:
+          type: string
+          description: Human-readable base, e.g. "Chilonzor, Toshkent"
+        images:
+          type: array
+          description: Portfolio of previous work
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+
+    CompanyProfile:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        name:
+          type: string
+        phone:
+          type: string
+        description:
+          type: string
+        images:
+          type: array
+          items:
+            type: string
+        online:
+          type: boolean
+        banned:
+          type: boolean
+        rating:
+          type: number
+          format: double
+        ratings_count:
+          type: integer
+        avatar_url:
+          type: string
+          description: The firm's logo; `images` stays the work gallery
+        address:
+          type: string
+        working_hours:
+          type: string
+          description: Free text, e.g. "Dush–Shan 9:00–18:00"
+        employees_count:
+          type: integer
+        experience_years:
+          type: integer
+        email:
+          type: string
+        website:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Order:
+      type: object
+      properties:
+        id:
+          type: string
+        customer_id:
+          type: string
+        worker_id:
+          type: string
+        company_id:
+          type: string
+        category_id:
+          type: string
+        gender:
+          type: string
+          enum: [male, female, any]
+        description:
+          type: string
+        image_url:
+          type: string
+        customer_phone:
+          type: string
+        worker_phone:
+          type: string
+        lat:
+          type: number
+          format: double
+        lng:
+          type: number
+          format: double
+        status:
+          type: string
+          enum: [pending, matching, invited, accepted, in_progress, completed, cancelled, expired]
+        invited_worker_ids:
+          type: array
+          items:
+            type: string
+        invite_expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Rating:
+      type: object
+      properties:
+        id:
+          type: string
+        order_id:
+          type: string
+        from_user_id:
+          type: string
+        to_user_id:
+          type: string
+        stars:
+          type: integer
+          minimum: 1
+          maximum: 5
+        comment:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Wallet:
+      type: object
+      properties:
+        balance:
+          type: integer
+        credit_limit:
+          type: integer
+        currency:
+          type: string
+          example: UZS
+        min_balance:
+          type: integer
+
+    Payment:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        provider:
+          type: string
+          enum: [click, payme]
+        amount:
+          type: integer
+        status:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        type:
+          type: string
+        title:
+          type: string
+        body:
+          type: string
+        data:
+          type: object
+        read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    Analytics:
+      type: object
+      properties:
+        buckets:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              count:
+                type: integer
+              revenue:
+                type: integer
+        totals:
+          type: object
+          properties:
+            count:
+              type: integer
+            revenue:
+              type: integer
+
+    Finance:
+      type: object
+      properties:
+        payments:
+          type: array
+          items:
+            $ref: "#/components/schemas/Payment"
+        totals:
+          type: object
+          properties:
+            topups:
+              type: integer
+            commission:
+              type: integer
+        commission_percent:
+          type: integer
+
+    Settings:
+      type: object
+      properties:
+        commission_percent:
+          type: integer
+        min_balance:
+          type: integer
