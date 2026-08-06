@@ -1,6 +1,7 @@
 package store
 
 import (
+	"math"
 	"sort"
 	"time"
 
@@ -302,6 +303,9 @@ type CompanyInput struct {
 	Description string
 	Images      []string
 	Price       int64
+	CategoryIDs []string
+	Lat         float64
+	Lng         float64
 
 	AvatarURL       string
 	Address         string
@@ -314,19 +318,20 @@ type CompanyInput struct {
 
 func (s *Store) scanCompany(row interface{ Scan(dest ...any) error }) (*models.CompanyProfile, error) {
 	var cp models.CompanyProfile
-	var images string
+	var images, categoryIDs string
 	err := row.Scan(&cp.ID, &cp.UserID, &cp.Name, &cp.Phone, &cp.Description, &images,
 		&cp.Online, &cp.Banned, &cp.Rating, &cp.RatingsCount, &cp.CreatedAt, &cp.Price,
 		&cp.AvatarURL, &cp.Address, &cp.WorkingHours, &cp.EmployeesCount, &cp.ExperienceYears,
-		&cp.Email, &cp.Website)
+		&cp.Email, &cp.Website, &categoryIDs, &cp.Lat, &cp.Lng)
 	if err != nil {
 		return nil, err
 	}
 	cp.Images = unmarshalStrings(images)
+	cp.CategoryIDs = unmarshalStrings(categoryIDs)
 	return &cp, nil
 }
 
-const companyCols = "id, user_id, name, phone, description, images, online, banned, rating, ratings_count, created_at, price, avatar_url, address, working_hours, employees_count, experience_years, email, website"
+const companyCols = "id, user_id, name, phone, description, images, online, banned, rating, ratings_count, created_at, price, avatar_url, address, working_hours, employees_count, experience_years, email, website, category_ids, lat, lng"
 
 // CreateCompanyProfile creates a company profile and grants the company role.
 func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.CompanyProfile, error) {
@@ -343,6 +348,13 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 	if in.Name == "" || in.Price <= 0 {
 		return nil, ErrBadRequest
 	}
+	// A firm that lists a category nobody has heard of is a firm no search
+	// finds, so a bad id is refused rather than quietly stored.
+	for _, c := range in.CategoryIDs {
+		if !s.categoryExists(c) {
+			return nil, ErrBadRequest
+		}
+	}
 	cp := &models.CompanyProfile{
 		ID:              id.New(),
 		UserID:          userID,
@@ -351,6 +363,9 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 		Description:     in.Description,
 		Images:          in.Images,
 		Price:           in.Price,
+		CategoryIDs:     in.CategoryIDs,
+		Lat:             in.Lat,
+		Lng:             in.Lng,
 		Online:          false,
 		AvatarURL:       in.AvatarURL,
 		Address:         in.Address,
@@ -364,13 +379,17 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 	if cp.Images == nil {
 		cp.Images = []string{}
 	}
+	if cp.CategoryIDs == nil {
+		cp.CategoryIDs = []string{}
+	}
 	s.db.Exec(`INSERT INTO companies (id, user_id, name, phone, description, images, created_at, price,
-		avatar_url, address, working_hours, employees_count, experience_years, email, website)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		avatar_url, address, working_hours, employees_count, experience_years, email, website,
+		category_ids, lat, lng)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		cp.ID, cp.UserID, cp.Name, cp.Phone, cp.Description,
 		marshalJSON(cp.Images), cp.CreatedAt, cp.Price,
 		cp.AvatarURL, cp.Address, cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears,
-		cp.Email, cp.Website)
+		cp.Email, cp.Website, marshalJSON(cp.CategoryIDs), cp.Lat, cp.Lng)
 	s.addRoleInternal(userID, models.RoleCompany)
 	return cp, nil
 }
@@ -380,6 +399,9 @@ type CompanyPatch struct {
 	Description *string
 	Images      *[]string
 	Price       *int64
+	CategoryIDs *[]string
+	Lat         *float64
+	Lng         *float64
 	// Phone is admin-only: the company's contact number is part of the record
 	// the office fills in, not something the account edits itself.
 	Phone *string
@@ -408,6 +430,15 @@ func (p CompanyPatch) apply(cp *models.CompanyProfile) {
 	if p.Price != nil && *p.Price > 0 {
 		cp.Price = *p.Price
 	}
+	if p.CategoryIDs != nil {
+		cp.CategoryIDs = *p.CategoryIDs
+	}
+	if p.Lat != nil {
+		cp.Lat = *p.Lat
+	}
+	if p.Lng != nil {
+		cp.Lng = *p.Lng
+	}
 	if p.AvatarURL != nil {
 		cp.AvatarURL = *p.AvatarURL
 	}
@@ -432,23 +463,50 @@ func (p CompanyPatch) apply(cp *models.CompanyProfile) {
 	if cp.Images == nil {
 		cp.Images = []string{}
 	}
+	if cp.CategoryIDs == nil {
+		cp.CategoryIDs = []string{}
+	}
+}
+
+// validCategories reports whether every id in a patch names a real category.
+// Nil (field not sent) passes — only what was written is checked.
+func (s *Store) validCategories(ids *[]string) bool {
+	if ids == nil {
+		return true
+	}
+	for _, c := range *ids {
+		if !s.categoryExists(c) {
+			return false
+		}
+	}
+	return true
 }
 
 // companyUpdateSQL writes every editable column except phone, which only the
-// admin path sets. Callers append their own WHERE clause starting at $12.
+// admin path sets. Callers append their own WHERE clause starting at $15.
 const companyUpdateSQL = `UPDATE companies SET name=$1, description=$2, images=$3, price=$4,
 	avatar_url=$5, address=$6, working_hours=$7, employees_count=$8, experience_years=$9,
-	email=$10, website=$11`
+	email=$10, website=$11, category_ids=$12, lat=$13, lng=$14`
+
+// companyUpdateArgs is the $1..$14 tail every writer of companyUpdateSQL passes.
+func companyUpdateArgs(cp *models.CompanyProfile) []any {
+	return []any{
+		cp.Name, cp.Description, marshalJSON(cp.Images), cp.Price, cp.AvatarURL, cp.Address,
+		cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears, cp.Email, cp.Website,
+		marshalJSON(cp.CategoryIDs), cp.Lat, cp.Lng,
+	}
+}
 
 func (s *Store) UpdateCompanyProfile(userID string, p CompanyPatch) (*models.CompanyProfile, error) {
 	cp, ok := s.getCompanyByUser(userID)
 	if !ok {
 		return nil, ErrNotFound
 	}
+	if !s.validCategories(p.CategoryIDs) {
+		return nil, ErrBadRequest
+	}
 	p.apply(cp)
-	s.db.Exec(companyUpdateSQL+" WHERE user_id=$12",
-		cp.Name, cp.Description, marshalJSON(cp.Images), cp.Price, cp.AvatarURL, cp.Address,
-		cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears, cp.Email, cp.Website, userID)
+	s.db.Exec(companyUpdateSQL+" WHERE user_id=$15", append(companyUpdateArgs(cp), userID)...)
 	return cp, nil
 }
 
@@ -481,6 +539,39 @@ func (s *Store) ListOnlineCompanies(excludeUserID string) []models.CompanyProfil
 		}
 		out = append(out, *cp)
 	}
+	return out
+}
+
+// NearbyCompanies is ListOnlineCompanies narrowed to firms within radiusKm of a
+// point, nearest first.
+//
+// A firm with no pin on its record (0,0 — every firm created before the map was
+// part of the form) is kept and listed after the located ones. Dropping it would
+// make the office's own back catalogue vanish from the customer's list the day
+// this shipped, which is a worse failure than an unsorted row at the bottom.
+func (s *Store) NearbyCompanies(lat, lng, radiusKm float64, excludeUserID string) []models.CompanyProfile {
+	all := s.ListOnlineCompanies(excludeUserID)
+	if radiusKm <= 0 || (lat == 0 && lng == 0) {
+		return all
+	}
+	out := []models.CompanyProfile{}
+	dist := map[string]float64{}
+	for _, cp := range all {
+		if cp.Lat == 0 && cp.Lng == 0 {
+			dist[cp.ID] = math.MaxFloat64
+			out = append(out, cp)
+			continue
+		}
+		d := geo.DistanceKm(lat, lng, cp.Lat, cp.Lng)
+		if d > radiusKm {
+			continue
+		}
+		dist[cp.ID] = d
+		km := d
+		cp.DistanceKm = &km
+		out = append(out, cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return dist[out[i].ID] < dist[out[j].ID] })
 	return out
 }
 
@@ -541,13 +632,14 @@ func (s *Store) AdminUpdateCompany(companyID string, p CompanyPatch) (*models.Co
 	if !ok {
 		return nil, ErrNotFound
 	}
+	if !s.validCategories(p.CategoryIDs) {
+		return nil, ErrBadRequest
+	}
 	p.apply(cp)
 	if p.Phone != nil {
 		cp.Phone = normalizePhone(*p.Phone)
 	}
-	s.db.Exec(companyUpdateSQL+", phone=$12 WHERE id=$13",
-		cp.Name, cp.Description, marshalJSON(cp.Images), cp.Price, cp.AvatarURL, cp.Address,
-		cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears, cp.Email, cp.Website,
-		cp.Phone, companyID)
+	s.db.Exec(companyUpdateSQL+", phone=$15 WHERE id=$16",
+		append(companyUpdateArgs(cp), cp.Phone, companyID)...)
 	return cp, nil
 }

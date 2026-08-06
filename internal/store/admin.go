@@ -308,6 +308,9 @@ func (s *Store) AdminCreateWorker(in AdminWorkerInput) (*models.User, error) {
 	}); err != nil {
 		return nil, err
 	}
+	// The profile alone does not make the account a worker: the admin screens
+	// sort people by role, and the role.changed event below carries the roles.
+	s.ChangeRole(u.ID, models.RoleWorker, "add")
 	// A credit limit lets the worker take jobs before topping up — the usual
 	// arrangement for someone the office just signed up.
 	if in.CreditLimit > 0 {
@@ -406,6 +409,9 @@ type AdminCompanyInput struct {
 	Description string
 	Images      []string
 	Price       int64
+	CategoryIDs []string
+	Lat         float64
+	Lng         float64
 	CreditLimit int64
 	Online      bool
 
@@ -444,6 +450,9 @@ func (s *Store) AdminCreateCompany(in AdminCompanyInput) (*models.User, error) {
 		Description:     in.Description,
 		Images:          in.Images,
 		Price:           in.Price,
+		CategoryIDs:     in.CategoryIDs,
+		Lat:             in.Lat,
+		Lng:             in.Lng,
 		AvatarURL:       in.AvatarURL,
 		Address:         in.Address,
 		WorkingHours:    in.WorkingHours,
@@ -454,6 +463,9 @@ func (s *Store) AdminCreateCompany(in AdminCompanyInput) (*models.User, error) {
 	}); err != nil {
 		return nil, err
 	}
+	// Same as for a worker: without the role the firm shows up as a plain
+	// customer in the admin list.
+	s.ChangeRole(u.ID, models.RoleCompany, "add")
 	if in.CreditLimit > 0 {
 		s.SetWalletCreditLimit(u.ID, in.CreditLimit)
 	}

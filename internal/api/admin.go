@@ -192,6 +192,9 @@ func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request
 		Description string   `json:"description"`
 		Images      []string `json:"images"`
 		Price       int64    `json:"price"`
+		CategoryIDs []string `json:"category_ids"`
+		Lat         float64  `json:"lat"`
+		Lng         float64  `json:"lng"`
 		CreditLimit int64    `json:"credit_limit"`
 		Online      bool     `json:"online"`
 
@@ -213,6 +216,9 @@ func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request
 		Description:     in.Description,
 		Images:          in.Images,
 		Price:           in.Price,
+		CategoryIDs:     in.CategoryIDs,
+		Lat:             in.Lat,
+		Lng:             in.Lng,
 		CreditLimit:     in.CreditLimit,
 		Online:          in.Online,
 		AvatarURL:       in.AvatarURL,
@@ -421,6 +427,9 @@ func (s *Server) handleAdminUpdateCompany(w http.ResponseWriter, r *http.Request
 		Images      *[]string `json:"images"`
 		Price       *int64    `json:"price"`
 		Phone       *string   `json:"phone"`
+		CategoryIDs *[]string `json:"category_ids"`
+		Lat         *float64  `json:"lat"`
+		Lng         *float64  `json:"lng"`
 
 		AvatarURL       *string `json:"avatar_url"`
 		Address         *string `json:"address"`
@@ -439,6 +448,9 @@ func (s *Server) handleAdminUpdateCompany(w http.ResponseWriter, r *http.Request
 		Images:          in.Images,
 		Price:           in.Price,
 		Phone:           in.Phone,
+		CategoryIDs:     in.CategoryIDs,
+		Lat:             in.Lat,
+		Lng:             in.Lng,
 		AvatarURL:       in.AvatarURL,
 		Address:         in.Address,
 		WorkingHours:    in.WorkingHours,

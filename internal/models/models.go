@@ -112,11 +112,24 @@ type CompanyProfile struct {
 	Images      []string `json:"images"`
 	// Price is the company's service fee in so'm. Required — customers order at
 	// this price, they do not name their own.
-	Price        int64   `json:"price"`
-	Online       bool    `json:"online"`
-	Banned       bool    `json:"banned"`
-	Rating       float64 `json:"rating"`
-	RatingsCount int     `json:"ratings_count"`
+	Price int64 `json:"price"`
+	// CategoryIDs is what the firm actually does. A company is never broadcast
+	// to the way a worker is, so this does not gate dispatch — it is how a
+	// customer browsing by service finds the firm at all.
+	CategoryIDs []string `json:"category_ids"`
+	// Lat/Lng is where the office is. Same purpose as Address, for the half of
+	// customers who read a pin faster than a street name, and what the nearby
+	// filter on GET /companies measures from.
+	Lat float64 `json:"lat"`
+	Lng float64 `json:"lng"`
+	// DistanceKm is how far the office is from the customer asking. Set only by
+	// the nearby listing — a profile fetched on its own has nobody to measure
+	// from — and left out for a firm that never dropped a pin.
+	DistanceKm   *float64 `json:"distance_km,omitempty"`
+	Online       bool     `json:"online"`
+	Banned       bool     `json:"banned"`
+	Rating       float64  `json:"rating"`
+	RatingsCount int      `json:"ratings_count"`
 	// AvatarURL is the firm's logo. Images stays the work gallery.
 	AvatarURL string `json:"avatar_url"`
 	// Address is where the office is, in words.

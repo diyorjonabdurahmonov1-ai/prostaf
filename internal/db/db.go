@@ -186,6 +186,13 @@ func migrate(db *sql.DB) {
 		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS website TEXT NOT NULL DEFAULT ''`,
 
+		// A firm is described like a worker now: which services it offers and
+		// where it sits. Existing rows keep 0,0 — treated as "no pin set", so a
+		// firm that predates this stays visible in the nearby list.
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS category_ids TEXT NOT NULL DEFAULT '[]'`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION NOT NULL DEFAULT 0`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION NOT NULL DEFAULT 0`,
+
 		// Uploaded images live in the database, not on disk: the server runs on a
 		// host with an ephemeral filesystem, and a photo that disappears on the
 		// next deploy is worse than no photo at all. Rows are small (a picker
@@ -203,6 +210,23 @@ func migrate(db *sql.DB) {
 		// schema). Existing rows are treated as issued now — they are about to be
 		// replaced by the next request anyway.
 		`ALTER TABLE otps ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
+
+		// Accounts the office created before the role was assigned at creation
+		// time carry a profile but no matching role, so the admin list files them
+		// under "customer". Re-derive the role from the profile that exists.
+		`UPDATE users u SET roles = (
+			SELECT jsonb_agg(DISTINCT r)::text
+			FROM jsonb_array_elements(u.roles::jsonb || '["worker"]'::jsonb) AS r
+		)
+		WHERE EXISTS (SELECT 1 FROM workers w WHERE w.user_id = u.id)
+		  AND NOT (u.roles::jsonb @> '["worker"]'::jsonb)`,
+
+		`UPDATE users u SET roles = (
+			SELECT jsonb_agg(DISTINCT r)::text
+			FROM jsonb_array_elements(u.roles::jsonb || '["company"]'::jsonb) AS r
+		)
+		WHERE EXISTS (SELECT 1 FROM companies c WHERE c.user_id = u.id)
+		  AND NOT (u.roles::jsonb @> '["company"]'::jsonb)`,
 
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,

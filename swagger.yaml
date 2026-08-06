@@ -777,6 +777,19 @@ paths:
     get:
       tags: [Company]
       summary: List online companies (public)
+      description: >
+        Optionally narrowed to firms within radius_km of a point. Firms with no
+        pin on their record (lat/lng 0,0) are always included, listed last.
+      parameters:
+        - name: lat
+          in: query
+          schema: { type: number, format: double }
+        - name: lng
+          in: query
+          schema: { type: number, format: double }
+        - name: radius_km
+          in: query
+          schema: { type: number, format: double }
       responses:
         "200":
           description: Company list
@@ -1574,6 +1587,18 @@ components:
           type: array
           items:
             type: string
+        category_ids:
+          type: array
+          description: Services the firm offers; how a customer browsing by category finds it
+          items:
+            type: string
+        lat:
+          type: number
+          format: double
+          description: Office location; 0,0 means no pin was set
+        lng:
+          type: number
+          format: double
         online:
           type: boolean
         banned:

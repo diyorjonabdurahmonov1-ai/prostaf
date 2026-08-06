@@ -611,11 +611,25 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 	if !ok {
 		return nil, ErrNotFound
 	}
+	// A company order has no worker on it — the firm's own account is the other
+	// side of the job, so it is rated and it rates back exactly like a worker.
+	companyUserID := ""
+	if o.CompanyID != "" {
+		if cp, ok := s.GetCompanyByID(o.CompanyID); ok {
+			companyUserID = cp.UserID
+		}
+	}
 	var toUserID string
-	switch fromUserID {
-	case o.CustomerID:
-		toUserID = o.WorkerID
-	case o.WorkerID:
+	switch {
+	case fromUserID == o.CustomerID:
+		if o.WorkerID != "" {
+			toUserID = o.WorkerID
+		} else {
+			toUserID = companyUserID
+		}
+	case o.WorkerID != "" && fromUserID == o.WorkerID:
+		toUserID = o.CustomerID
+	case companyUserID != "" && fromUserID == companyUserID:
 		toUserID = o.CustomerID
 	default:
 		return nil, ErrForbidden
@@ -641,6 +655,15 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 		newCount := wp.RatingsCount + 1
 		newRating := total / float64(newCount)
 		s.db.Exec("UPDATE workers SET rating=$1, ratings_count=$2 WHERE user_id=$3", newRating, newCount, toUserID)
+	}
+	// And the target company's, for an account that is a firm. Both branches can
+	// fire for one account that is registered as worker and firm at once — each
+	// profile then carries the score earned under that hat.
+	if cp, ok := s.getCompanyByUser(toUserID); ok {
+		total := cp.Rating*float64(cp.RatingsCount) + float64(stars)
+		newCount := cp.RatingsCount + 1
+		newRating := total / float64(newCount)
+		s.db.Exec("UPDATE companies SET rating=$1, ratings_count=$2 WHERE user_id=$3", newRating, newCount, toUserID)
 	}
 	return r, nil
 }

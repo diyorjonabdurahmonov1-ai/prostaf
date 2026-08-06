@@ -90,6 +90,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/company/orders/{id}/reject", s.authed(s.handleCompanyReject))
 	mux.HandleFunc("GET "+p+"/companies", s.authed(s.handleListCompanies))
 	mux.HandleFunc("GET "+p+"/companies/{id}", s.authed(s.handleGetCompany))
+	mux.HandleFunc("GET "+p+"/companies/{id}/reviews", s.authed(s.handleCompanyReviews))
 	mux.HandleFunc("POST "+p+"/companies/{id}/order", s.authed(s.handleCompanyOrder))
 
 	// Orders.

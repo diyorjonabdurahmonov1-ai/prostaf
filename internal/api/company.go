@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 
 	"prostaff/internal/models"
 	"prostaff/internal/push"
@@ -18,6 +19,9 @@ func (s *Server) handlePatchCompanyProfile(w http.ResponseWriter, r *http.Reques
 		Description *string   `json:"description"`
 		Images      *[]string `json:"images"`
 		Price       *int64    `json:"price"`
+		CategoryIDs *[]string `json:"category_ids"`
+		Lat         *float64  `json:"lat"`
+		Lng         *float64  `json:"lng"`
 
 		AvatarURL       *string `json:"avatar_url"`
 		Address         *string `json:"address"`
@@ -35,6 +39,9 @@ func (s *Server) handlePatchCompanyProfile(w http.ResponseWriter, r *http.Reques
 		Description:     body.Description,
 		Images:          body.Images,
 		Price:           body.Price,
+		CategoryIDs:     body.CategoryIDs,
+		Lat:             body.Lat,
+		Lng:             body.Lng,
 		AvatarURL:       body.AvatarURL,
 		Address:         body.Address,
 		WorkingHours:    body.WorkingHours,
@@ -67,9 +74,14 @@ func (s *Server) handleCompanyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cp)
 }
 
-// GET /companies (public list of bookable online companies)
+// GET /companies?lat=&lng=&radius_km= (bookable online companies; the point is
+// optional and narrows the list to firms near the customer)
 func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request) {
-	companies := s.store.ListOnlineCompanies(userFrom(r).ID)
+	q := r.URL.Query()
+	lat, _ := strconv.ParseFloat(q.Get("lat"), 64)
+	lng, _ := strconv.ParseFloat(q.Get("lng"), 64)
+	radius, _ := strconv.ParseFloat(q.Get("radius_km"), 64)
+	companies := s.store.NearbyCompanies(lat, lng, radius, userFrom(r).ID)
 	if companies == nil {
 		companies = []models.CompanyProfile{}
 	}
@@ -84,6 +96,19 @@ func (s *Server) handleGetCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, cp)
+}
+
+// GET /companies/{id}/reviews — what customers wrote about this firm.
+//
+// The mirror of the worker route: kept off the profile for the same reason, and
+// `{id}` is likewise the company profile id while ratings are keyed by account.
+func (s *Server) handleCompanyReviews(w http.ResponseWriter, r *http.Request) {
+	cp, ok := s.store.GetCompanyByID(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", "company not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, s.store.ListReviews(cp.UserID, 50))
 }
 
 // GET /company/orders (company's incoming orders)
