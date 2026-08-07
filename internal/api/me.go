@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"time"
 
@@ -69,6 +70,19 @@ func (s *Server) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		list = []models.Notification{}
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// POST /notifications/read — body { ids } (empty marks the whole inbox).
+func (s *Server) handleReadNotifications(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	// A bodyless call is the common one ("I opened the list"), so a missing or
+	// unreadable body is not an error — it means "all of them".
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	s.store.MarkNotificationsRead(u.ID, body.IDs)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // parseSince parses an RFC3339 timestamp, returning the zero time when empty or

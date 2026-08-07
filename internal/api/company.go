@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"prostaff/internal/models"
-	"prostaff/internal/push"
 	"prostaff/internal/sse"
 	"prostaff/internal/store"
 )
@@ -148,19 +147,12 @@ func (s *Server) handleCompanyOrder(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	// Notify the company owner in realtime.
+	// Notify the company owner in realtime, and leave the message behind so a
+	// firm that missed the banner still finds the job in their notifications.
 	if company, ok := s.store.GetCompanyByID(companyID); ok {
 		s.publish(company.UserID, sse.Event{Type: "order.status", Data: map[string]any{"order": order}})
-		// Push notification so the company owner gets alerted even if the app is closed.
-		if tok := s.store.GetPushToken(company.UserID); tok != "" {
-			push.Send(push.Urgent(
-				tok,
-				"Yangi buyurtma!",
-				order.Description,
-				map[string]any{"type": "order.status", "order_id": order.ID},
-				0,
-			))
-		}
+		s.notify(company.UserID, "order.new", "Yangi buyurtma!", order.Description,
+			map[string]any{"order_id": order.ID})
 	}
 	writeJSON(w, http.StatusCreated, order)
 }
@@ -185,14 +177,15 @@ func (s *Server) companyRespond(w http.ResponseWriter, r *http.Request, accept b
 	}
 	event := "order.status"
 	title := "Buyurtma bekor qilindi"
+	body := order.Description
 	if accept {
 		event = "order.accepted"
 		title = "Firma buyurtmani qabul qildi"
+		if order.WorkerPhone != "" {
+			body = "Telefon raqami: " + order.WorkerPhone
+		}
 	}
 	s.publish(order.CustomerID, sse.Event{Type: event, Data: map[string]any{"order": order}})
-	if tok := s.store.GetPushToken(order.CustomerID); tok != "" {
-		push.Send(push.Urgent(tok, title, order.Description,
-			map[string]any{"type": event, "order_id": order.ID}, 0))
-	}
+	s.notify(order.CustomerID, event, title, body, map[string]any{"order_id": order.ID})
 	writeJSON(w, http.StatusOK, order)
 }

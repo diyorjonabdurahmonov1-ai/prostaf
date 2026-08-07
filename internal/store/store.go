@@ -337,6 +337,18 @@ func (s *Store) AddNotification(n *models.Notification) *models.Notification {
 	return n
 }
 
+// MarkNotificationsRead clears the unread flag. With no ids the whole inbox is
+// marked — which is what opening the list means.
+func (s *Store) MarkNotificationsRead(userID string, ids []string) {
+	if len(ids) == 0 {
+		s.db.Exec("UPDATE notifications SET read=TRUE WHERE user_id=$1 AND read=FALSE", userID)
+		return
+	}
+	for _, nid := range ids {
+		s.db.Exec("UPDATE notifications SET read=TRUE WHERE user_id=$1 AND id=$2", userID, nid)
+	}
+}
+
 func (s *Store) ListNotifications(userID string, since time.Time) []models.Notification {
 	var rows *sql.Rows
 	var err error

@@ -65,6 +65,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/me/push-test", s.authed(s.handlePushTest))
 	mux.HandleFunc("GET "+p+"/categories", s.authed(s.handleCategories))
 	mux.HandleFunc("GET "+p+"/notifications", s.authed(s.handleNotifications))
+	mux.HandleFunc("POST "+p+"/notifications/read", s.authed(s.handleReadNotifications))
 
 	// Images. Uploading needs an account; reading does not, because an <Image>
 	// tag sends no Authorization header and the id is an unguessable uuid.

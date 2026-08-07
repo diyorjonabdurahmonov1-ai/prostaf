@@ -139,12 +139,22 @@ func (s *Server) dispatch(orderID string, fallback *models.Order) *models.Order 
 // expireIfDue closes a search whose window has run out and tells the customer.
 // Safe to call at any time: an order that was taken, or whose window was
 // re-opened, is left alone.
+//
+// The notification is the point of this, not the socket event. A search nobody
+// answered used to end in silence — the row quietly moved to the finished tab
+// and a customer who had put their phone down never learned that no worker was
+// coming. "Nobody took it" is news, and it is the one outcome the customer has
+// to act on.
 func (s *Server) expireIfDue(orderID string) {
 	if expired, changed := s.store.ExpireIfSearching(orderID); changed {
 		s.publish(expired.CustomerID, sse.Event{
 			Type: "order.expired",
 			Data: map[string]any{"order": expired},
 		})
+		s.notify(expired.CustomerID, "order.expired",
+			"Buyurtmangizni hech kim qabul qilmadi",
+			"Yaqin atrofda bo'sh ishchi topilmadi. Buyurtmani qaytadan yuboring yoki narxni oshiring.",
+			map[string]any{"order_id": expired.ID})
 	}
 }
 
@@ -186,6 +196,11 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 
 	var pushMessages []push.Message
 	for _, wuid := range workerUserIDs {
+		// Stored, not notified: the push for this wave goes out below in one
+		// batched call, and going through notify() would ring every worker
+		// twice for the same job.
+		s.record(wuid, "order.invite", "Yangi buyurtma!", order.Description,
+			map[string]any{"order_id": order.ID})
 		// High priority + time-sensitive so it rings through Focus modes; the
 		// TTL matches the search window — a late invite is just noise.
 		if tok := s.store.GetPushToken(wuid); tok != "" {

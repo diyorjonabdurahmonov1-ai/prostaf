@@ -1,7 +1,6 @@
 package store
 
 import (
-	"math"
 	"sort"
 	"time"
 
@@ -546,9 +545,18 @@ func (s *Store) ListOnlineCompanies(excludeUserID string) []models.CompanyProfil
 // point, nearest first.
 //
 // A firm with no pin on its record (0,0 — every firm created before the map was
-// part of the form) is kept and listed after the located ones. Dropping it would
-// make the office's own back catalogue vanish from the customer's list the day
-// this shipped, which is a worse failure than an unsorted row at the bottom.
+// part of the form) is dropped from a located search. It used to be kept and
+// listed after the located ones, so that the office's back catalogue did not
+// vanish the day the map shipped; the cost of that was a "nearby" list which
+// was not nearby. Every unpinned firm on the platform showed up to every
+// customer at every radius, which is how a test firm in another city ended up
+// in the results — and a customer cannot tell a stale record from a firm that
+// is genuinely around the corner.
+//
+// The fix for such a firm is to give it a pin (admin → company → location), not
+// to show it to everybody. Without a point to measure from — the caller sent no
+// coordinates, or no radius — nothing is filtered and the whole online list
+// comes back as before.
 func (s *Store) NearbyCompanies(lat, lng, radiusKm float64, excludeUserID string) []models.CompanyProfile {
 	all := s.ListOnlineCompanies(excludeUserID)
 	if radiusKm <= 0 || (lat == 0 && lng == 0) {
@@ -558,8 +566,6 @@ func (s *Store) NearbyCompanies(lat, lng, radiusKm float64, excludeUserID string
 	dist := map[string]float64{}
 	for _, cp := range all {
 		if cp.Lat == 0 && cp.Lng == 0 {
-			dist[cp.ID] = math.MaxFloat64
-			out = append(out, cp)
 			continue
 		}
 		d := geo.DistanceKm(lat, lng, cp.Lat, cp.Lng)

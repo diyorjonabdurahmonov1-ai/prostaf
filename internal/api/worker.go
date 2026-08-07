@@ -5,7 +5,6 @@ import (
 	"strconv"
 
 	"prostaff/internal/models"
-	"prostaff/internal/push"
 	"prostaff/internal/sse"
 	"prostaff/internal/store"
 )
@@ -16,7 +15,13 @@ func (s *Server) handleNearbyWorkers(w http.ResponseWriter, r *http.Request) {
 	lat, _ := strconv.ParseFloat(q.Get("lat"), 64)
 	lng, _ := strconv.ParseFloat(q.Get("lng"), 64)
 	radius, _ := strconv.ParseFloat(q.Get("radius_km"), 64)
-	writeJSON(w, http.StatusOK, s.store.NearbyWorkers(lat, lng, radius, userFrom(r).ID))
+	u := userFrom(r)
+	found := s.store.NearbyWorkers(lat, lng, radius, u.ID)
+	out := make([]models.WorkerProfile, 0, len(found))
+	for _, wp := range found {
+		out = append(out, s.publicWorker(u, wp))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // GET /workers/{id} — public worker profile.
@@ -26,7 +31,34 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "worker not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, wp)
+	writeJSON(w, http.StatusOK, s.publicWorker(userFrom(r), *wp))
+}
+
+// publicWorker is a worker record as somebody browsing is allowed to see it —
+// which is everything except the phone number.
+//
+// A directory of reachable workers is exactly what the platform sells, and
+// printing the number on the profile handed it out for free: a customer could
+// read it off the search results and ring the worker directly, and the job that
+// followed was invisible to the platform and earned it nothing. Worse for the
+// worker, who is then negotiating without the order, the price or the record.
+//
+// The number appears the moment it is needed and not before: when this worker
+// accepted an order from this customer. It stays visible on the finished job,
+// because "call them back about yesterday" is a real thing people do.
+func (s *Server) publicWorker(viewer *models.User, wp models.WorkerProfile) models.WorkerProfile {
+	if viewer == nil {
+		wp.Phone = ""
+		return wp
+	}
+	if wp.UserID == viewer.ID || viewer.HasRole(models.RoleAdmin) {
+		return wp
+	}
+	if s.store.HasHiredWorker(viewer.ID, wp.UserID) {
+		return wp
+	}
+	wp.Phone = ""
+	return wp
 }
 
 // GET /workers/{id}/reviews — what customers wrote about this worker.
@@ -150,15 +182,12 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 			Data: map[string]any{"order": taken},
 		})
 	}
-	// Push notification to customer.
-	if tok := s.store.GetPushToken(order.CustomerID); tok != "" {
-		push.Send(push.Message{
-			To:    tok,
-			Title: "Buyurtma qabul qilindi!",
-			Body:  wp.FullName + " buyurtmangizni qabul qildi",
-			Data:  map[string]any{"type": "order.accepted", "order_id": order.ID},
-		})
-	}
+	// And tell the customer for keeps: a push for the phone in their pocket and
+	// a row in their notification list for when they come back to it.
+	s.notify(order.CustomerID, "order.accepted",
+		"Buyurtma qabul qilindi!",
+		wp.FullName+" buyurtmangizni qabul qildi. Telefon raqami: "+order.WorkerPhone,
+		map[string]any{"order_id": order.ID})
 	writeJSON(w, http.StatusOK, order)
 }
 

@@ -537,6 +537,28 @@ paths:
                 items:
                   $ref: "#/components/schemas/Notification"
 
+  /notifications/read:
+    post:
+      tags: [Me]
+      summary: Mark notifications read
+      description: >
+        Clears the unread flag. An empty body (or an empty `ids` array) marks the
+        whole inbox, which is what opening the notification screen means.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                ids:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "200":
+          description: Marked
+
   # ──────────────────────────── Worker ──────────────────────────
   /worker/profile:
     post:

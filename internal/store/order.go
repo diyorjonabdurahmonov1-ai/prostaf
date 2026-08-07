@@ -42,6 +42,26 @@ func (s *Store) WorkerIsBusy(workerUserID string) bool {
 	return err == nil && n > 0
 }
 
+// HasHiredWorker reports whether this worker ever took a job from this
+// customer. It is the gate on the worker's phone number: the platform hands it
+// over once the two are actually working together, and never for a browser
+// scrolling the list.
+//
+// Completed jobs count. The order is over, but calling back about the work is
+// not a way around the platform — it is the same job.
+func (s *Store) HasHiredWorker(customerID, workerUserID string) bool {
+	if customerID == "" || workerUserID == "" {
+		return false
+	}
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM orders
+		 WHERE customer_id=$1 AND worker_id=$2
+		   AND status IN ('accepted','in_progress','completed')`,
+		customerID, workerUserID).Scan(&n)
+	return err == nil && n > 0
+}
+
 // CompanyIsBusy reports whether the company is already on a job.
 func (s *Store) CompanyIsBusy(companyID string) bool {
 	var n int

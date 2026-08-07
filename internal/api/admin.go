@@ -121,14 +121,22 @@ func (s *Server) handleAdminCreateWorker(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if user != nil {
-		go s.notifyRoleChange(user.ID, user.Roles)
+		go s.notifyRoleChange(user.ID, user.Roles, models.RoleWorker, true)
 	}
 	writeJSON(w, http.StatusCreated, user)
 }
 
-// notifyRoleChange fires a role.changed SSE event to the given user so the
-// mobile app updates its panel list without requiring a manual refresh.
-func (s *Server) notifyRoleChange(userID string, roles []string) {
+// notifyRoleChange fires a role.changed event to the given user so the mobile
+// app updates its panel list without requiring a manual refresh, and — when the
+// change is one the person would want to hear about — tells them in words.
+//
+// The socket event alone was invisible: somebody the office signed up as a
+// worker got a new tab in their app and no explanation of where it came from,
+// and if their app was closed at the time, not even that until they next opened
+// it. `changed` names the role that moved and `granted` says which way, so the
+// message can be the one that actually happened rather than "something about
+// your account is different".
+func (s *Server) notifyRoleChange(userID string, roles []string, changed string, granted bool) {
 	if roles == nil {
 		roles = []string{}
 	}
@@ -136,6 +144,27 @@ func (s *Server) notifyRoleChange(userID string, roles []string) {
 		Type: "role.changed",
 		Data: map[string]any{"roles": roles},
 	})
+
+	var title, body string
+	switch {
+	case changed == models.RoleWorker && granted:
+		title = "Siz ishchi bo'ldingiz"
+		body = "Profilingiz ishchi sifatida faollashtirildi. Ilovadagi \"Ishchi\" panelidan buyurtmalarni qabul qilishingiz mumkin."
+	case changed == models.RoleCompany && granted:
+		title = "Siz firma bo'ldingiz"
+		body = "Profilingiz firma sifatida faollashtirildi. Ilovadagi \"Firma\" panelidan buyurtmalarni qabul qilishingiz mumkin."
+	case changed == models.RoleWorker && !granted:
+		title = "Ishchi profili o'chirildi"
+		body = "Endi ilovadan ishchi sifatida buyurtma qabul qila olmaysiz."
+	case changed == models.RoleCompany && !granted:
+		title = "Firma profili o'chirildi"
+		body = "Endi ilovadan firma sifatida buyurtma qabul qila olmaysiz."
+	default:
+		// customer / admin: nothing a person needs to be woken up for.
+		return
+	}
+	s.notify(userID, "role.changed", title, body,
+		map[string]any{"role": changed, "granted": granted})
 }
 
 // PATCH /admin/workers/{id} — correct any field of a worker record.
@@ -234,7 +263,7 @@ func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request
 		return
 	}
 	if user != nil {
-		go s.notifyRoleChange(user.ID, user.Roles)
+		go s.notifyRoleChange(user.ID, user.Roles, models.RoleCompany, true)
 	}
 	writeJSON(w, http.StatusCreated, user)
 }
@@ -324,11 +353,9 @@ func (s *Server) handleAdminRoles(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	// Notify the user instantly so their app does not need a manual refresh.
-	s.publish(user.ID, sse.Event{
-		Type: "role.changed",
-		Data: map[string]any{"roles": user.Roles},
-	})
+	// Notify the user instantly so their app does not need a manual refresh —
+	// and tell them what changed, which the socket event on its own never did.
+	s.notifyRoleChange(user.ID, user.Roles, in.Role, in.Action == "add")
 	writeJSON(w, http.StatusOK, user)
 }
 
@@ -346,13 +373,11 @@ func (s *Server) handleAdminPush(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found")
 		return
 	}
-	n := s.store.AddNotification(&models.Notification{
-		UserID: userID,
-		Type:   "admin.push",
-		Title:  in.Title,
-		Body:   in.Body,
-	})
+	// Stored, socketed *and* pushed. This used to do the first two only, so an
+	// operator's message reached a phone that happened to be open and nobody
+	// else's.
 	s.publish(userID, sse.Event{Type: "admin.push", Data: map[string]any{"title": in.Title, "body": in.Body}})
+	n := s.notify(userID, "admin.push", in.Title, in.Body, nil)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "notification": n})
 }
 
