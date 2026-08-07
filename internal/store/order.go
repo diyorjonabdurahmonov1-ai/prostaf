@@ -672,18 +672,22 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 			companyUserID = cp.UserID
 		}
 	}
-	var toUserID string
+	// Who is being rated, and as what. The role comes from the order, not from
+	// what profiles the account happens to own: a job with a worker_id was a
+	// worker's job, a job with a company_id was a firm's, and whoever rates the
+	// customer back is rating them as a customer.
+	var toUserID, toRole string
 	switch {
 	case fromUserID == o.CustomerID:
 		if o.WorkerID != "" {
-			toUserID = o.WorkerID
+			toUserID, toRole = o.WorkerID, models.RoleWorker
 		} else {
-			toUserID = companyUserID
+			toUserID, toRole = companyUserID, models.RoleCompany
 		}
 	case o.WorkerID != "" && fromUserID == o.WorkerID:
-		toUserID = o.CustomerID
+		toUserID, toRole = o.CustomerID, models.RoleCustomer
 	case companyUserID != "" && fromUserID == companyUserID:
-		toUserID = o.CustomerID
+		toUserID, toRole = o.CustomerID, models.RoleCustomer
 	default:
 		return nil, ErrForbidden
 	}
@@ -695,33 +699,47 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 		OrderID:    orderID,
 		FromUserID: fromUserID,
 		ToUserID:   toUserID,
+		TargetRole: toRole,
 		Stars:      stars,
 		Comment:    comment,
 		CreatedAt:  time.Now(),
 	}
-	s.db.Exec("INSERT INTO ratings (id, order_id, from_user_id, to_user_id, stars, comment, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
-		r.ID, r.OrderID, r.FromUserID, r.ToUserID, r.Stars, r.Comment, r.CreatedAt)
+	s.db.Exec("INSERT INTO ratings (id, order_id, from_user_id, to_user_id, target_role, stars, comment, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+		r.ID, r.OrderID, r.FromUserID, r.ToUserID, r.TargetRole, r.Stars, r.Comment, r.CreatedAt)
 
-	// Update the target worker's rating aggregate.
-	if wp, ok := s.GetWorkerByUser(toUserID); ok {
-		total := wp.Rating*float64(wp.RatingsCount) + float64(stars)
-		newCount := wp.RatingsCount + 1
-		newRating := total / float64(newCount)
-		s.db.Exec("UPDATE workers SET rating=$1, ratings_count=$2 WHERE user_id=$3", newRating, newCount, toUserID)
-	}
-	// And the target company's, for an account that is a firm. Both branches can
-	// fire for one account that is registered as worker and firm at once — each
-	// profile then carries the score earned under that hat.
-	if cp, ok := s.getCompanyByUser(toUserID); ok {
-		total := cp.Rating*float64(cp.RatingsCount) + float64(stars)
-		newCount := cp.RatingsCount + 1
-		newRating := total / float64(newCount)
-		s.db.Exec("UPDATE companies SET rating=$1, ratings_count=$2 WHERE user_id=$3", newRating, newCount, toUserID)
+	// Exactly one aggregate moves, the one for the hat that was worn.
+	//
+	// This used to be two independent `if`s, so an account registered as both
+	// worker and firm had every star written to both averages — and a customer
+	// who also worked saw their worker rating shift every time a firm rated them
+	// as a customer. A customer has no score of their own to keep, so that case
+	// stores the rating and stops.
+	switch toRole {
+	case models.RoleWorker:
+		if wp, ok := s.GetWorkerByUser(toUserID); ok {
+			total := wp.Rating*float64(wp.RatingsCount) + float64(stars)
+			newCount := wp.RatingsCount + 1
+			s.db.Exec("UPDATE workers SET rating=$1, ratings_count=$2 WHERE user_id=$3",
+				total/float64(newCount), newCount, toUserID)
+		}
+	case models.RoleCompany:
+		if cp, ok := s.getCompanyByUser(toUserID); ok {
+			total := cp.Rating*float64(cp.RatingsCount) + float64(stars)
+			newCount := cp.RatingsCount + 1
+			s.db.Exec("UPDATE companies SET rating=$1, ratings_count=$2 WHERE user_id=$3",
+				total/float64(newCount), newCount, toUserID)
+		}
 	}
 	return r, nil
 }
 
-// ListReviews returns what has been said *about* a user, newest first.
+// ListReviews returns what has been said about a user *in one role*, newest
+// first. Pass RoleWorker for a worker profile, RoleCompany for a firm.
+//
+// The role is not optional. One account can be a worker and a firm at once, and
+// without the filter both profiles served the same list of comments: a customer
+// reading a firm's page saw complaints about a plumbing job the same account
+// did as an individual, and vice versa. The two pages are two reputations.
 //
 // The aggregate on the profile (4.7 ★, 12 ratings) says how it went; this says
 // why. Reviews with no words still come back — the star alone is a data point,
@@ -729,7 +747,7 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 //
 // The author's name comes from the users table, so a customer who later renames
 // their account is not frozen under the name they had that day.
-func (s *Store) ListReviews(toUserID string, limit int) []models.Review {
+func (s *Store) ListReviews(toUserID, role string, limit int) []models.Review {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -738,9 +756,9 @@ func (s *Store) ListReviews(toUserID string, limit int) []models.Review {
 		       COALESCE(u.name, ''), COALESCE(u.avatar_url, '')
 		FROM ratings r
 		LEFT JOIN users u ON u.id = r.from_user_id
-		WHERE r.to_user_id = $1
+		WHERE r.to_user_id = $1 AND r.target_role = $2
 		ORDER BY r.created_at DESC
-		LIMIT $2`, toUserID, limit)
+		LIMIT $3`, toUserID, role, limit)
 	if err != nil {
 		return nil
 	}

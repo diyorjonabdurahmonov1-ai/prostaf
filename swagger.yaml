@@ -1705,6 +1705,14 @@ components:
           type: string
         to_user_id:
           type: string
+        target_role:
+          type: string
+          enum: [worker, company, customer]
+          description: >
+            The hat the rated account wore on this job. One account can hold all
+            three roles and each reputation is scored and listed separately, so
+            GET /workers/{id}/reviews and GET /companies/{id}/reviews never
+            return each other's comments.
         stars:
           type: integer
           minimum: 1

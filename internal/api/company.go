@@ -130,7 +130,7 @@ func (s *Server) handleCompanyReviews(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "company not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.ListReviews(cp.UserID, 50))
+	writeJSON(w, http.StatusOK, s.store.ListReviews(cp.UserID, models.RoleCompany, 50))
 }
 
 // GET /company/orders (company's incoming orders)

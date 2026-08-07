@@ -184,10 +184,18 @@ type Order struct {
 
 // Rating is a two-way review tied to an order.
 type Rating struct {
-	ID         string    `json:"id"`
-	OrderID    string    `json:"order_id"`
-	FromUserID string    `json:"from_user_id"`
-	ToUserID   string    `json:"to_user_id"`
+	ID         string `json:"id"`
+	OrderID    string `json:"order_id"`
+	FromUserID string `json:"from_user_id"`
+	ToUserID   string `json:"to_user_id"`
+	// TargetRole is the hat the rated account was wearing on this job:
+	// RoleWorker, RoleCompany or RoleCustomer.
+	//
+	// One account can hold all three. Without this the score had nowhere to be
+	// filed: a star earned on a worker job was added to the firm's average as
+	// well, and a star a firm gave its *customer* landed on that customer's own
+	// worker profile. Ratings and their comments are separated by this column.
+	TargetRole string    `json:"target_role"`
 	Stars      int       `json:"stars"`
 	Comment    string    `json:"comment,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`

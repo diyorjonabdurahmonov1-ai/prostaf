@@ -228,11 +228,53 @@ func migrate(db *sql.DB) {
 		WHERE EXISTS (SELECT 1 FROM companies c WHERE c.user_id = u.id)
 		  AND NOT (u.roles::jsonb @> '["company"]'::jsonb)`,
 
+		// A rating belongs to one reputation, not to an account.
+		//
+		// One person can be a worker, a firm and a customer at once. Without this
+		// column there was nowhere to file a score: `Rate` wrote every star to
+		// both the worker and the company aggregate if the account had both, a
+		// firm rating its customer moved that customer's own worker average, and
+		// the two review lists served the same comments to both profiles.
+		`ALTER TABLE ratings ADD COLUMN IF NOT EXISTS target_role TEXT NOT NULL DEFAULT ''`,
+
+		// Backfill from the order each rating hangs off: rated the customer →
+		// 'customer', otherwise the job's own kind. Only touches rows written
+		// before the column existed.
+		`UPDATE ratings r SET target_role = CASE
+			WHEN r.to_user_id = o.customer_id THEN 'customer'
+			WHEN o.company_id <> ''           THEN 'company'
+			ELSE 'worker'
+		END
+		FROM orders o
+		WHERE o.id = r.order_id AND r.target_role = ''`,
+
+		// A rating whose order is gone cannot be placed; treat it as a provider
+		// score so it is not silently dropped from every list.
+		`UPDATE ratings SET target_role = 'worker' WHERE target_role = ''`,
+
+		// Rebuild both aggregates from the ratings themselves. The stored numbers
+		// were accumulated by the double-write above, so an account holding two
+		// profiles carries an average of jobs it did under the other hat — no
+		// incremental fix reaches that, only a recount. Idempotent, and cheap at
+		// this size: after this the column is simply the truth about the table.
+		`UPDATE workers w SET
+			rating = COALESCE((SELECT AVG(r.stars) FROM ratings r
+				WHERE r.to_user_id = w.user_id AND r.target_role = 'worker'), 0),
+			ratings_count = (SELECT COUNT(*) FROM ratings r
+				WHERE r.to_user_id = w.user_id AND r.target_role = 'worker')`,
+
+		`UPDATE companies c SET
+			rating = COALESCE((SELECT AVG(r.stars) FROM ratings r
+				WHERE r.to_user_id = c.user_id AND r.target_role = 'company'), 0),
+			ratings_count = (SELECT COUNT(*) FROM ratings r
+				WHERE r.to_user_id = c.user_id AND r.target_role = 'company')`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_worker   ON orders(worker_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_ratings_target ON ratings(to_user_id, target_role, created_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_workers_user ON workers(user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_companies_user ON companies(user_id)`,
 	}

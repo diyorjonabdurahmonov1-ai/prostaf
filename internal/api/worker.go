@@ -75,7 +75,7 @@ func (s *Server) handleWorkerReviews(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "worker not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.store.ListReviews(wp.UserID, 50))
+	writeJSON(w, http.StatusOK, s.store.ListReviews(wp.UserID, models.RoleWorker, 50))
 }
 
 // PATCH /worker/profile
