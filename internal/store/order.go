@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"log"
 	"sort"
 	"time"
 
@@ -59,6 +60,22 @@ func (s *Store) HasHiredWorker(customerID, workerUserID string) bool {
 		 WHERE customer_id=$1 AND worker_id=$2
 		   AND status IN ('accepted','in_progress','completed')`,
 		customerID, workerUserID).Scan(&n)
+	return err == nil && n > 0
+}
+
+// HasHiredCompany is HasHiredWorker for a firm. Company orders are keyed by the
+// company profile id rather than a user id, which is why it cannot share the
+// query above.
+func (s *Store) HasHiredCompany(customerID, companyID string) bool {
+	if customerID == "" || companyID == "" {
+		return false
+	}
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM orders
+		 WHERE customer_id=$1 AND company_id=$2
+		   AND status IN ('accepted','in_progress','completed')`,
+		customerID, companyID).Scan(&n)
 	return err == nil && n > 0
 }
 
@@ -134,9 +151,12 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		InviteExpiresAt:   &expires,
 		CreatedAt:         time.Now(),
 	}
-	s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
 		o.ID, o.CustomerID, "", "", o.CategoryID, o.Gender, o.Description, o.ImageURL,
-		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]")
+		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]"); err != nil {
+		log.Printf("store: order insert failed: %v", err)
+		return nil, ErrOrderNotSaved
+	}
 	return o, nil
 }
 
@@ -158,15 +178,20 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 		return nil, ErrNotFound
 	}
 	if cp.Banned {
-		return nil, ErrForbidden
+		return nil, ErrCompanyBanned
 	}
 	// You cannot hire yourself.
 	if cp.UserID == customerID {
-		return nil, ErrForbidden
+		return nil, ErrOwnCompany
 	}
 	// A company already on a job takes no new orders until it finishes.
+	//
+	// Worth knowing when this fires unexpectedly: only the customer can close a
+	// job (Complete checks CustomerID), so a firm whose last customer never
+	// tapped "Ish tugadi" stays busy indefinitely and refuses every order after
+	// it. That is why this now says so rather than returning a bare conflict.
 	if s.CompanyIsBusy(cp.ID) {
-		return nil, ErrConflict
+		return nil, ErrCompanyBusy
 	}
 	// Fall back to the account name when the form left it blank.
 	name := in.Name
@@ -193,9 +218,17 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 		RejectedWorkerIDs: []string{},
 		CreatedAt:         time.Now(),
 	}
-	s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+	// The error is checked, unlike almost every other write in this file. An
+	// ignored Exec here meant a failed insert still returned the order object
+	// and a 201: the customer got the "sent!" screen, the firm got nothing, and
+	// there was no record anywhere of an order that never existed. A write that
+	// did not happen has to be an error the caller can see.
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
 		o.ID, o.CustomerID, "", o.CompanyID, "", o.Gender, o.Description, o.ImageURL,
-		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", nil, 0, o.CreatedAt, o.CustomerName, o.Price, "[]")
+		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", nil, 0, o.CreatedAt, o.CustomerName, o.Price, "[]"); err != nil {
+		log.Printf("store: company order insert failed: %v", err)
+		return nil, ErrOrderNotSaved
+	}
 	return o, nil
 }
 

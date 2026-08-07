@@ -80,9 +80,11 @@ func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request) {
 	lat, _ := strconv.ParseFloat(q.Get("lat"), 64)
 	lng, _ := strconv.ParseFloat(q.Get("lng"), 64)
 	radius, _ := strconv.ParseFloat(q.Get("radius_km"), 64)
-	companies := s.store.NearbyCompanies(lat, lng, radius, userFrom(r).ID)
-	if companies == nil {
-		companies = []models.CompanyProfile{}
+	u := userFrom(r)
+	found := s.store.NearbyCompanies(lat, lng, radius, u.ID)
+	companies := make([]models.CompanyProfile, 0, len(found))
+	for _, cp := range found {
+		companies = append(companies, s.publicCompany(u, cp))
 	}
 	writeJSON(w, http.StatusOK, companies)
 }
@@ -94,7 +96,28 @@ func (s *Server) handleGetCompany(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "company not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, cp)
+	writeJSON(w, http.StatusOK, s.publicCompany(userFrom(r), *cp))
+}
+
+// publicCompany is publicWorker for a firm, and for the same reason: a listing
+// of reachable providers is the product, and printing the number on the profile
+// gives it away to anyone who scrolls past.
+//
+// The number is on the order once the firm accepts, which is where the customer
+// reads it — this only keeps it off the profile page.
+func (s *Server) publicCompany(viewer *models.User, cp models.CompanyProfile) models.CompanyProfile {
+	if viewer == nil {
+		cp.Phone = ""
+		return cp
+	}
+	if cp.UserID == viewer.ID || viewer.HasRole(models.RoleAdmin) {
+		return cp
+	}
+	if s.store.HasHiredCompany(viewer.ID, cp.ID) {
+		return cp
+	}
+	cp.Phone = ""
+	return cp
 }
 
 // GET /companies/{id}/reviews — what customers wrote about this firm.

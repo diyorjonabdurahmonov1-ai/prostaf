@@ -25,8 +25,26 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 }
 
 // writeStoreError maps a store sentinel error to the proper HTTP status.
+//
+// The messages are shown to the person who tapped the button — the app prints
+// `error.message` straight onto the screen — so they are in the user's language
+// and say what to do next. A refusal that reads "request conflicts with current
+// state" is indistinguishable, from the other side of the glass, from a button
+// that simply does not work.
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, store.ErrCompanyBusy):
+		writeError(w, http.StatusConflict, "company_busy",
+			"Bu firma hozir boshqa buyurtma ustida ishlamoqda. Ish tugagach qayta urinib ko'ring.")
+	case errors.Is(err, store.ErrCompanyBanned):
+		writeError(w, http.StatusForbidden, "company_banned",
+			"Bu firma vaqtincha buyurtma qabul qilmaydi.")
+	case errors.Is(err, store.ErrOwnCompany):
+		writeError(w, http.StatusForbidden, "own_company",
+			"O'z firmangizga buyurtma bera olmaysiz.")
+	case errors.Is(err, store.ErrOrderNotSaved):
+		writeError(w, http.StatusInternalServerError, "order_not_saved",
+			"Buyurtma saqlanmadi. Qayta urinib ko'ring.")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
 	case errors.Is(err, store.ErrConflict):

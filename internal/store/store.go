@@ -20,6 +20,16 @@ var (
 	ErrForbidden           = errors.New("forbidden")
 	ErrBadRequest          = errors.New("bad_request")
 	ErrInsufficientBalance = errors.New("insufficient_balance")
+
+	// The reasons an order to a firm is refused. They were all plain
+	// ErrConflict / ErrForbidden, which reached the customer as "request
+	// conflicts with current state" — a sentence that tells somebody staring at
+	// an order form precisely nothing, and reads exactly like the button did not
+	// work. Each of these becomes its own message.
+	ErrCompanyBusy   = errors.New("company_busy")
+	ErrCompanyBanned = errors.New("company_banned")
+	ErrOwnCompany    = errors.New("own_company")
+	ErrOrderNotSaved = errors.New("order_not_saved")
 )
 
 // matchRadiusKm is the smart-matchmaking radius.
