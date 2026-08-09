@@ -5,6 +5,7 @@ package api
 import (
 	"net/http"
 
+	"prostaff/internal/atmos"
 	"prostaff/internal/config"
 	"prostaff/internal/sse"
 	"prostaff/internal/store"
@@ -18,13 +19,32 @@ type Server struct {
 	hub   *sse.Hub
 	// ws is the realtime transport the mobile app actually uses; `hub` (SSE)
 	// stays for the web build. Handlers publish through s.publish, not either.
-	ws      *ws.Hub
+	ws *ws.Hub
+	// atmos is the payment gateway. Never nil — an unconfigured client reports
+	// itself disabled, which is what keeps development working without a
+	// merchant account.
+	atmos   *atmos.Client
 	handler http.Handler
 }
 
 // NewServer builds a Server with all routes and middleware wired.
 func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
-	s := &Server{cfg: cfg, store: st, hub: hub, ws: ws.NewHub()}
+	s := &Server{
+		cfg:   cfg,
+		store: st,
+		hub:   hub,
+		ws:    ws.NewHub(),
+		atmos: atmos.New(atmos.Config{
+			BaseURL:        cfg.AtmosBaseURL,
+			CheckoutURL:    cfg.AtmosCheckoutURL,
+			ConsumerKey:    cfg.AtmosConsumerKey,
+			ConsumerSecret: cfg.AtmosConsumerSecret,
+			StoreID:        cfg.AtmosStoreID,
+			TerminalID:     cfg.AtmosTerminalID,
+			APIKey:         cfg.AtmosAPIKey,
+			RedirectURL:    cfg.AtmosRedirectURL,
+		}),
+	}
 	s.handler = recoverMW(logMW(corsMW(cfg.AllowedOrigins)(s.routes())))
 	return s
 }
@@ -66,6 +86,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET "+p+"/categories", s.authed(s.handleCategories))
 	mux.HandleFunc("GET "+p+"/notifications", s.authed(s.handleNotifications))
 	mux.HandleFunc("POST "+p+"/notifications/read", s.authed(s.handleReadNotifications))
+	// Standing warnings (out of free jobs, subscription about to lapse) — the
+	// state of the account rather than a list of things that happened to it.
+	mux.HandleFunc("GET "+p+"/alerts", s.authed(s.handleAlerts))
 
 	// Images. Uploading needs an account; reading does not, because an <Image>
 	// tag sends no Authorization header and the id is an unguessable uuid.
@@ -105,9 +128,21 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/orders/{id}/cancel", s.authed(s.handleCancel))
 	mux.HandleFunc("POST "+p+"/orders/{id}/rate", s.authed(s.handleRate))
 
-	// Wallet.
+	// Wallet and payments. A top-up opens a transaction at Atmos and hands back
+	// the invoice URL; nothing is credited until the signed callback lands.
 	mux.HandleFunc("GET "+p+"/wallet", s.authed(s.handleGetWallet))
 	mux.HandleFunc("POST "+p+"/wallet/topup", s.authed(s.handleTopup))
+	mux.HandleFunc("GET "+p+"/payments", s.authed(s.handleListPayments))
+	mux.HandleFunc("GET "+p+"/payments/{id}", s.authed(s.handleGetPayment))
+	// A firm buys its own months off a tariff card. The prices come from the
+	// server so the number the firm agrees to is the number it is charged.
+	mux.HandleFunc("GET "+p+"/company/subscription/plans", s.authed(s.handleSubscriptionPlans))
+	mux.HandleFunc("POST "+p+"/company/subscription/checkout", s.authed(s.handleCompanySubscriptionCheckout))
+	// The gateway's callback. Public by necessity — Atmos holds no credentials
+	// of ours — and safe because every callback is signature-checked before
+	// anything is looked up. This is the URL to register in the merchant
+	// cabinet.
+	mux.HandleFunc("POST "+p+"/payments/atmos/callback", s.handleAtmosCallback)
 
 	// Admin.
 	mux.HandleFunc("GET "+p+"/admin/stats", s.admin(s.handleAdminStats))
@@ -122,6 +157,8 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/admin/users/{id}/push", s.admin(s.handleAdminPush))
 	mux.HandleFunc("POST "+p+"/admin/users/{id}/balance", s.admin(s.handleAdminBalance))
 	mux.HandleFunc("POST "+p+"/admin/users/{id}/credit-limit", s.admin(s.handleAdminUserCreditLimit))
+	// The trial ledger, for undoing a free job spent by mistake.
+	mux.HandleFunc("POST "+p+"/admin/users/{id}/free-orders", s.admin(s.handleAdminFreeOrders))
 	// Provider onboarding — the only way to become a worker or a company.
 	mux.HandleFunc("POST "+p+"/admin/workers", s.admin(s.handleAdminCreateWorker))
 	mux.HandleFunc("PATCH "+p+"/admin/workers/{id}", s.admin(s.handleAdminUpdateWorker))
@@ -135,8 +172,21 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/admin/companies/{id}/unban", s.admin(s.handleAdminUnbanCompany))
 	mux.HandleFunc("POST "+p+"/admin/companies/{id}/status", s.admin(s.handleAdminCompanyStatus))
 	mux.HandleFunc("PATCH "+p+"/admin/companies/{id}", s.admin(s.handleAdminUpdateCompany))
+	// A firm's account is months, not a balance: this is where they are sold.
+	mux.HandleFunc("POST "+p+"/admin/companies/{id}/subscription", s.admin(s.handleAdminExtendSubscription))
+	mux.HandleFunc("GET "+p+"/admin/companies/{id}/subscriptions", s.admin(s.handleAdminSubscriptions))
+	// Who has bought what, across every firm — the office's sales history.
+	mux.HandleFunc("GET "+p+"/admin/subscriptions", s.admin(s.handleAdminAllSubscriptions))
+	// Every payment attempt, including the ones that failed and why.
+	mux.HandleFunc("GET "+p+"/admin/payments", s.admin(s.handleAdminPayments))
 	mux.HandleFunc("GET "+p+"/admin/analytics/orders", s.admin(s.handleAdminAnalytics))
 	mux.HandleFunc("GET "+p+"/admin/finance", s.admin(s.handleAdminFinance))
+	// The tariff cards a firm chooses between — length and price, nothing else.
+	mux.HandleFunc("GET "+p+"/admin/subscription-plans", s.admin(s.handleAdminPlans))
+	mux.HandleFunc("POST "+p+"/admin/subscription-plans", s.admin(s.handleAdminCreatePlan))
+	mux.HandleFunc("PATCH "+p+"/admin/subscription-plans/{id}", s.admin(s.handleAdminUpdatePlan))
+	mux.HandleFunc("DELETE "+p+"/admin/subscription-plans/{id}", s.admin(s.handleAdminDeletePlan))
+	mux.HandleFunc("GET "+p+"/admin/settings", s.admin(s.handleAdminGetSettings))
 	mux.HandleFunc("PATCH "+p+"/admin/settings", s.admin(s.handleAdminSettings))
 
 	// Health.

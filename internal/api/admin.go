@@ -1,7 +1,9 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"prostaff/internal/models"
 	"prostaff/internal/sse"
@@ -73,19 +75,22 @@ func (s *Server) handleAdminUserCreditLimit(w http.ResponseWriter, r *http.Reque
 // given phone number, so the worker simply signs in and finds their panel.
 func (s *Server) handleAdminCreateWorker(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Phone       string   `json:"phone"`
-		Gmail       string   `json:"gmail"`
-		Name        string   `json:"name"`
-		FullName    string   `json:"full_name"`
-		Gender      string   `json:"gender"`
-		Age         int      `json:"age"`
-		PriceMin    int64    `json:"price_min"`
-		PriceMax    int64    `json:"price_max"`
-		Lat         float64  `json:"lat"`
-		Lng         float64  `json:"lng"`
-		CategoryIDs []string `json:"category_ids"`
-		CreditLimit int64    `json:"credit_limit"`
-		Online      bool     `json:"online"`
+		Phone string `json:"phone"`
+		Gmail string `json:"gmail"`
+		Name  string `json:"name"`
+		// PassportSeries is required: it is what the worker's three free jobs are
+		// counted against, and it is unique across the platform.
+		PassportSeries string   `json:"passport_series"`
+		FullName       string   `json:"full_name"`
+		Gender         string   `json:"gender"`
+		Age            int      `json:"age"`
+		PriceMin       int64    `json:"price_min"`
+		PriceMax       int64    `json:"price_max"`
+		Lat            float64  `json:"lat"`
+		Lng            float64  `json:"lng"`
+		CategoryIDs    []string `json:"category_ids"`
+		CreditLimit    int64    `json:"credit_limit"`
+		Online         bool     `json:"online"`
 
 		AvatarURL       string   `json:"avatar_url"`
 		About           string   `json:"about"`
@@ -100,6 +105,7 @@ func (s *Server) handleAdminCreateWorker(w http.ResponseWriter, r *http.Request)
 		Phone:           in.Phone,
 		Gmail:           in.Gmail,
 		Name:            in.Name,
+		PassportSeries:  in.PassportSeries,
 		FullName:        in.FullName,
 		Gender:          in.Gender,
 		Age:             in.Age,
@@ -170,9 +176,10 @@ func (s *Server) notifyRoleChange(userID string, roles []string, changed string,
 // PATCH /admin/workers/{id} — correct any field of a worker record.
 func (s *Server) handleAdminUpdateWorker(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		FullName    *string   `json:"full_name"`
-		Phone       *string   `json:"phone"`
-		Gender      *string   `json:"gender"`
+		PassportSeries *string   `json:"passport_series"`
+		FullName       *string   `json:"full_name"`
+		Phone          *string   `json:"phone"`
+		Gender         *string   `json:"gender"`
 		Age         *int      `json:"age"`
 		PriceMin    *int64    `json:"price_min"`
 		PriceMax    *int64    `json:"price_max"`
@@ -190,6 +197,7 @@ func (s *Server) handleAdminUpdateWorker(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	wp, err := s.store.AdminUpdateWorker(r.PathValue("id"), store.AdminWorkerPatch{
+		PassportSeries:  in.PassportSeries,
 		FullName:        in.FullName,
 		Phone:           in.Phone,
 		Gender:          in.Gender,
@@ -215,17 +223,22 @@ func (s *Server) handleAdminUpdateWorker(w http.ResponseWriter, r *http.Request)
 // POST /admin/companies — put a service company on the platform.
 func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Phone       string   `json:"phone"`
-		Gmail       string   `json:"gmail"`
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Images      []string `json:"images"`
-		Price       int64    `json:"price"`
-		CategoryIDs []string `json:"category_ids"`
-		Lat         float64  `json:"lat"`
-		Lng         float64  `json:"lng"`
-		CreditLimit int64    `json:"credit_limit"`
-		Online      bool     `json:"online"`
+		Phone string `json:"phone"`
+		Gmail string `json:"gmail"`
+		Name  string `json:"name"`
+		// INN is required, and SubscriptionMonths optionally sells the firm its
+		// first months in the same call — a firm that paid at the counter should
+		// not have to be opened and then topped up in two steps.
+		INN                string   `json:"inn"`
+		SubscriptionMonths int      `json:"subscription_months"`
+		Description        string   `json:"description"`
+		Images             []string `json:"images"`
+		Price              int64    `json:"price"`
+		CategoryIDs        []string `json:"category_ids"`
+		Lat                float64  `json:"lat"`
+		Lng                float64  `json:"lng"`
+		CreditLimit        int64    `json:"credit_limit"`
+		Online             bool     `json:"online"`
 
 		AvatarURL       string `json:"avatar_url"`
 		Address         string `json:"address"`
@@ -239,9 +252,12 @@ func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request
 		return
 	}
 	user, err := s.store.AdminCreateCompany(store.AdminCompanyInput{
-		Phone:           in.Phone,
-		Gmail:           in.Gmail,
-		Name:            in.Name,
+		Phone:              in.Phone,
+		Gmail:              in.Gmail,
+		Name:               in.Name,
+		INN:                in.INN,
+		SubscriptionMonths: in.SubscriptionMonths,
+
 		Description:     in.Description,
 		Images:          in.Images,
 		Price:           in.Price,
@@ -452,6 +468,7 @@ func (s *Server) handleAdminUpdateCompany(w http.ResponseWriter, r *http.Request
 		Images      *[]string `json:"images"`
 		Price       *int64    `json:"price"`
 		Phone       *string   `json:"phone"`
+		INN         *string   `json:"inn"`
 		CategoryIDs *[]string `json:"category_ids"`
 		Lat         *float64  `json:"lat"`
 		Lng         *float64  `json:"lng"`
@@ -473,6 +490,7 @@ func (s *Server) handleAdminUpdateCompany(w http.ResponseWriter, r *http.Request
 		Images:          in.Images,
 		Price:           in.Price,
 		Phone:           in.Phone,
+		INN:             in.INN,
 		CategoryIDs:     in.CategoryIDs,
 		Lat:             in.Lat,
 		Lng:             in.Lng,
@@ -505,18 +523,228 @@ func (s *Server) handleAdminFinance(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.FinanceOverview())
 }
 
+// The tariff cards.
+//
+// A firm's plans differ in length and nothing else — every subscribed firm gets
+// the same platform — so the office sets a price per term and the app renders
+// them as cards. There is no monthly rate being multiplied out: "3 oy — 200 000"
+// is a number somebody decided, not one arithmetic derived.
+
+// GET /admin/subscription-plans — every tariff, including retired ones.
+func (s *Server) handleAdminPlans(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.ListSubscriptionPlans(false))
+}
+
+// POST /admin/subscription-plans
+func (s *Server) handleAdminCreatePlan(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Months int    `json:"months"`
+		Price  int64  `json:"price"`
+		Title  string `json:"title"`
+		// OldPrice is the struck-through figure on the card. Presentational and
+		// never charged.
+		OldPrice int64 `json:"old_price"`
+		Active   *bool `json:"active"`
+		Sort     *int  `json:"sort"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	plan, err := s.store.CreateSubscriptionPlan(store.PlanInput{
+		Months:   in.Months,
+		Price:    in.Price,
+		OldPrice: in.OldPrice,
+		Title:    in.Title,
+		Active:   in.Active,
+		Sort:     in.Sort,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, plan)
+}
+
+// PATCH /admin/subscription-plans/{id}
+func (s *Server) handleAdminUpdatePlan(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Months   *int    `json:"months"`
+		Price    *int64  `json:"price"`
+		OldPrice *int64  `json:"old_price"`
+		Title    *string `json:"title"`
+		Active   *bool   `json:"active"`
+		Sort     *int    `json:"sort"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	plan, err := s.store.UpdateSubscriptionPlan(r.PathValue("id"), store.PlanPatch{
+		Months:   in.Months,
+		Price:    in.Price,
+		OldPrice: in.OldPrice,
+		Title:    in.Title,
+		Active:   in.Active,
+		Sort:     in.Sort,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, plan)
+}
+
+// DELETE /admin/subscription-plans/{id}
+//
+// Safe at any time: a plan is only read to price a checkout, and the months a
+// firm already bought live on its own record. Nothing points back at this row.
+func (s *Server) handleAdminDeletePlan(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteSubscriptionPlan(r.PathValue("id")); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// GET /admin/settings — the current platform values.
+//
+// The panel used to read the commission out of /admin/finance and had nowhere at
+// all to read the rest, so a field it could not fetch was a field it rendered
+// blank and silently overwrote on save.
+func (s *Server) handleAdminGetSettings(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.GetSettings())
+}
+
 // PATCH /admin/settings
 func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		CommissionPercent *int   `json:"commission_percent"`
 		MinBalance        *int64 `json:"min_balance"`
+		// How many jobs a new provider gets free, what a firm's month costs, the
+		// standing discount on it, and how much notice a firm gets before its
+		// subscription runs out. All four are the office's to set.
+		FreeOrderLimit         *int   `json:"free_order_limit"`
+		CompanyMonthlyPrice    *int64 `json:"company_monthly_price"`
+		CompanyDiscountPercent *int   `json:"company_discount_percent"`
+		SubscriptionWarnDays   *int   `json:"subscription_warn_days"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
 	settings := s.store.UpdateSettings(store.SettingsPatch{
-		CommissionPercent: in.CommissionPercent,
-		MinBalance:        in.MinBalance,
+		CommissionPercent:      in.CommissionPercent,
+		MinBalance:             in.MinBalance,
+		FreeOrderLimit:         in.FreeOrderLimit,
+		CompanyMonthlyPrice:    in.CompanyMonthlyPrice,
+		CompanyDiscountPercent: in.CompanyDiscountPercent,
+		SubscriptionWarnDays:   in.SubscriptionWarnDays,
 	})
 	writeJSON(w, http.StatusOK, settings)
+}
+
+// POST /admin/companies/{id}/subscription — body { months, price_per_month?,
+// discount_percent? }. Sells a firm more months.
+//
+// Price and discount are optional: leaving them out uses the current settings,
+// which is the normal case. Sending them is how the office gives one firm a
+// deal without moving the price for everybody.
+func (s *Server) handleAdminExtendSubscription(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Months          int    `json:"months"`
+		PricePerMonth   *int64 `json:"price_per_month"`
+		DiscountPercent *int   `json:"discount_percent"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	sub, cp, err := s.store.ExtendCompanySubscription(r.PathValue("id"), store.SubscriptionExtension{
+		Months:          in.Months,
+		PricePerMonth:   in.PricePerMonth,
+		DiscountPercent: in.DiscountPercent,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	// The firm is told, and its app is told, so the banner that has been telling
+	// it to renew disappears without a manual refresh.
+	if cp != nil {
+		s.publish(cp.UserID, sse.Event{
+			Type: "subscription.changed",
+			Data: map[string]any{"company": cp},
+		})
+		until := ""
+		if cp.SubscriptionUntil != nil {
+			until = cp.SubscriptionUntil.Format("02.01.2006")
+		}
+		s.notify(cp.UserID, "subscription.extended",
+			"Obuna faollashtirildi",
+			fmt.Sprintf("Hisobingiz %d oyga uzaytirildi. Amal qilish muddati: %s.", sub.Months, until),
+			map[string]any{"months": sub.Months, "until": until, "amount": sub.Amount})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"subscription": sub, "company": cp})
+}
+
+// GET /admin/companies/{id}/subscriptions — what this firm has bought.
+func (s *Server) handleAdminSubscriptions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.ListCompanySubscriptions(r.PathValue("id")))
+}
+
+// GET /admin/payments?status=&purpose=&limit= — the payment log.
+//
+// Every attempt, not just the ones that worked, and each carrying whatever went
+// wrong with it in words. Before this the office could see money that had
+// arrived and nothing at all about money that had not: a firm ringing up to say
+// "I paid and nothing happened" was a conversation with no evidence on our side
+// of it.
+//
+// `status=problem` is the filter that matters — failures plus anything that
+// settled with a note on it.
+func (s *Server) handleAdminPayments(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	limit, _ := strconv.Atoi(q.Get("limit"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"payments": s.store.ListAllPayments(q.Get("status"), q.Get("purpose"), limit),
+		"totals":   s.store.PaymentOverview(),
+	})
+}
+
+// GET /admin/subscriptions — every tariff ever sold, newest first.
+//
+// The office's answer to "who is paying us, and who is about to stop": the
+// history alongside the two counters that decide whether anybody needs ringing
+// this week.
+func (s *Server) handleAdminAllSubscriptions(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"subscriptions": s.store.ListAllSubscriptions(limit),
+		"totals":        s.store.SubscriptionOverview(),
+	})
+}
+
+// POST /admin/users/{id}/free-orders — body { role, used }. Sets how many trial
+// jobs the account has spent.
+//
+// The counter hangs off the identity document, not the account, precisely so it
+// cannot be reset by re-creating a profile — which means an honest mistake (a
+// trial burned on a test order) needs a deliberate way back. This is it.
+func (s *Server) handleAdminFreeOrders(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Role string `json:"role"`
+		Used int    `json:"used"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	if in.Role == "" {
+		in.Role = models.RoleWorker
+	}
+	key := s.store.TrialKeyForUser(r.PathValue("id"), in.Role)
+	if key == "" {
+		writeError(w, http.StatusNotFound, "not_found",
+			"Bu foydalanuvchida hujjat raqami yo'q — passport seriyasi yoki INN kiritilmagan.")
+		return
+	}
+	s.store.SetFreeOrdersUsed(key, in.Used)
+	u, _ := s.store.UserView(r.PathValue("id"))
+	writeJSON(w, http.StatusOK, u)
 }

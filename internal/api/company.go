@@ -105,12 +105,21 @@ func (s *Server) handleGetCompany(w http.ResponseWriter, r *http.Request) {
 //
 // The number is on the order once the firm accepts, which is where the customer
 // reads it — this only keeps it off the profile page.
+// The INN and the firm's billing state are stripped for the same reason a
+// worker's passport is: what a firm pays the platform, and when its month runs
+// out, is between the firm and the office. A customer picks a firm on its work,
+// not on its invoices.
 func (s *Server) publicCompany(viewer *models.User, cp models.CompanyProfile) models.CompanyProfile {
-	if viewer == nil {
-		cp.Phone = ""
+	if viewer != nil && (cp.UserID == viewer.ID || viewer.HasRole(models.RoleAdmin)) {
 		return cp
 	}
-	if cp.UserID == viewer.ID || viewer.HasRole(models.RoleAdmin) {
+	cp.INN = ""
+	cp.SubscriptionUntil = nil
+	cp.SubscriptionDaysLeft = 0
+	cp.FreeOrdersUsed = 0
+	cp.FreeOrdersLimit = 0
+	if viewer == nil {
+		cp.Phone = ""
 		return cp
 	}
 	if s.store.HasHiredCompany(viewer.ID, cp.ID) {
@@ -148,12 +157,13 @@ func (s *Server) handleCompanyOrder(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	companyID := r.PathValue("id")
 	var body struct {
-		Description string  `json:"description"`
-		Phone       string  `json:"phone"`
-		Name        string  `json:"name"`
-		ImageURL    string  `json:"image_url"`
-		Lat         float64 `json:"lat"`
-		Lng         float64 `json:"lng"`
+		Description string   `json:"description"`
+		Phone       string   `json:"phone"`
+		Name        string   `json:"name"`
+		Images      []string `json:"images"`
+		ImageURL    string   `json:"image_url"`
+		Lat         float64  `json:"lat"`
+		Lng         float64  `json:"lng"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -162,6 +172,7 @@ func (s *Server) handleCompanyOrder(w http.ResponseWriter, r *http.Request) {
 		Description: body.Description,
 		Phone:       body.Phone,
 		Name:        body.Name,
+		Images:      body.Images,
 		ImageURL:    body.ImageURL,
 		Lat:         body.Lat,
 		Lng:         body.Lng,
@@ -210,5 +221,12 @@ func (s *Server) companyRespond(w http.ResponseWriter, r *http.Request, accept b
 	}
 	s.publish(order.CustomerID, sse.Event{Type: event, Data: map[string]any{"order": order}})
 	s.notify(order.CustomerID, event, title, body, map[string]any{"order_id": order.ID})
+	// A firm on its trial jobs is told the moment the last one is spent — the
+	// next order it is offered is one it cannot take without a subscription.
+	if accept {
+		if cp, ok := s.store.CompanyByUser(u.ID); ok && !cp.SubscriptionActive {
+			s.notifyTrialSpent(u.ID, cp.FreeOrdersLeft(), models.RoleCompany)
+		}
+	}
 	writeJSON(w, http.StatusOK, order)
 }

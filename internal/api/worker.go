@@ -46,14 +46,20 @@ func (s *Server) handleGetWorker(w http.ResponseWriter, r *http.Request) {
 // The number appears the moment it is needed and not before: when this worker
 // accepted an order from this customer. It stays visible on the finished job,
 // because "call them back about yesterday" is a real thing people do.
+// The passport series never leaves the office. It is on the record so the
+// platform can count three free jobs per person, and it is nobody's business but
+// the admin's and the worker's own — not a customer's, not even a customer who
+// has hired them.
 func (s *Server) publicWorker(viewer *models.User, wp models.WorkerProfile) models.WorkerProfile {
 	if viewer == nil {
 		wp.Phone = ""
+		wp.PassportSeries = ""
 		return wp
 	}
 	if wp.UserID == viewer.ID || viewer.HasRole(models.RoleAdmin) {
 		return wp
 	}
+	wp.PassportSeries = ""
 	if s.store.HasHiredWorker(viewer.ID, wp.UserID) {
 		return wp
 	}
@@ -188,6 +194,9 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 		"Buyurtma qabul qilindi!",
 		wp.FullName+" buyurtmangizni qabul qildi. Telefon raqami: "+order.WorkerPhone,
 		map[string]any{"order_id": order.ID})
+	// If that job was the last free one, say so now rather than letting the
+	// worker discover it when their phone goes quiet.
+	s.notifyTrialSpent(u.ID, wp.FreeOrdersLeft(), models.RoleWorker)
 	writeJSON(w, http.StatusOK, order)
 }
 

@@ -42,6 +42,27 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrOwnCompany):
 		writeError(w, http.StatusForbidden, "own_company",
 			"O'z firmangizga buyurtma bera olmaysiz.")
+	case errors.Is(err, store.ErrCompanyUnavailable):
+		writeError(w, http.StatusConflict, "company_unavailable",
+			"Bu firma hozircha buyurtma qabul qilmayapti. Boshqa firmani tanlang.")
+	case errors.Is(err, store.ErrPriceNotSet):
+		writeError(w, http.StatusConflict, "price_not_set",
+			"Bu muddat uchun tarif yo'q. Tarif qo'shing yoki narxni qo'lda kiriting.")
+	case errors.Is(err, store.ErrSubscriptionExpired):
+		writeError(w, http.StatusPaymentRequired, "subscription_expired",
+			"Obuna muddati tugagan. Buyurtma qabul qilish uchun obunani yangilang.")
+	case errors.Is(err, store.ErrInvalidPassport):
+		writeError(w, http.StatusBadRequest, "invalid_passport",
+			"Passport seriyasi noto'g'ri. Namuna: AA1234567.")
+	case errors.Is(err, store.ErrDuplicatePassport):
+		writeError(w, http.StatusConflict, "duplicate_passport",
+			"Bu passport seriyasi allaqachon ro'yxatdan o'tgan.")
+	case errors.Is(err, store.ErrInvalidINN):
+		writeError(w, http.StatusBadRequest, "invalid_inn",
+			"INN noto'g'ri. INN 9 ta raqamdan iborat bo'lishi kerak.")
+	case errors.Is(err, store.ErrDuplicateINN):
+		writeError(w, http.StatusConflict, "duplicate_inn",
+			"Bu INN allaqachon ro'yxatdan o'tgan.")
 	case errors.Is(err, store.ErrOrderNotSaved):
 		writeError(w, http.StatusInternalServerError, "order_not_saved",
 			"Buyurtma saqlanmadi. Qayta urinib ko'ring.")
@@ -54,10 +75,28 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrBadRequest):
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid request")
 	case errors.Is(err, store.ErrInsufficientBalance):
-		writeError(w, http.StatusPaymentRequired, "insufficient_balance", "top up your wallet or request a credit limit")
+		// The exact figure lives on the alert banner, which knows the setting;
+		// this only has to say which of the two things went wrong.
+		writeError(w, http.StatusPaymentRequired, "insufficient_balance",
+			"Hisobingizda yetarli mablag' yo'q. Bepul ishlar tugagan — buyurtma olish uchun hisobingizni to'ldiring.")
 	default:
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 	}
+}
+
+// errGatewayUnavailable is the payment gateway refusing or failing to answer.
+// Separate from a store error because nothing is wrong with the request — the
+// only useful thing to say is "try again".
+var errGatewayUnavailable = errors.New("gateway_unavailable")
+
+// writePaymentError maps a checkout failure to something the payer can act on.
+func writePaymentError(w http.ResponseWriter, err error) {
+	if errors.Is(err, errGatewayUnavailable) {
+		writeError(w, http.StatusBadGateway, "gateway_unavailable",
+			"To'lov tizimiga ulanib bo'lmadi. Bir necha daqiqadan so'ng qayta urinib ko'ring.")
+		return
+	}
+	writeStoreError(w, err)
 }
 
 // decodeJSON decodes the request body into dst. On failure it writes a 400 and

@@ -24,11 +24,15 @@ type OrderInput struct {
 	CategoryID  string
 	Gender      string
 	Description string
-	ImageURL    string
-	Phone       string
-	Price       int64
-	Lat         float64
-	Lng         float64
+	// Images is every photo attached to the job. ImageURL is what an older app
+	// sends instead of a list; whichever arrives, the first photo ends up in
+	// both so no reader has to know which client made the order.
+	Images   []string
+	ImageURL string
+	Phone    string
+	Price    int64
+	Lat      float64
+	Lng      float64
 }
 
 // A worker or company is "busy" while one of their orders is accepted or
@@ -90,24 +94,30 @@ func (s *Store) CompanyIsBusy(companyID string) bool {
 
 func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Order, error) {
 	var o models.Order
-	var invitedIDs, rejectedIDs string
+	var invitedIDs, rejectedIDs, images string
 	var inviteExpires sql.NullTime
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
-		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs)
+		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images)
 	if err != nil {
 		return nil, err
 	}
 	o.InvitedWorkerIDs = unmarshalStrings(invitedIDs)
 	o.RejectedWorkerIDs = unmarshalStrings(rejectedIDs)
+	o.Images = unmarshalStrings(images)
+	// An order written before photos were a list still has its one in the old
+	// column; the reader is where that difference stops mattering.
+	if len(o.Images) == 0 && o.ImageURL != "" {
+		o.Images = []string{o.ImageURL}
+	}
 	if inviteExpires.Valid {
 		o.InviteExpiresAt = &inviteExpires.Time
 	}
 	return &o, nil
 }
 
-const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids"
+const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -140,6 +150,7 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		Gender:            in.Gender,
 		Description:       in.Description,
 		ImageURL:          in.ImageURL,
+		Images:            in.Images,
 		CustomerName:      customerName,
 		CustomerPhone:     in.Phone,
 		Price:             in.Price,
@@ -151,13 +162,44 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		InviteExpiresAt:   &expires,
 		CreatedAt:         time.Now(),
 	}
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+	normalizeOrderPhotos(o)
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
 		o.ID, o.CustomerID, "", "", o.CategoryID, o.Gender, o.Description, o.ImageURL,
-		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]"); err != nil {
+		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
+		marshalJSON(o.Images)); err != nil {
 		log.Printf("store: order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
 	return o, nil
+}
+
+// maxOrderPhotos is what one job can usefully carry. Past this it is not a
+// description any more, it is an album, and every reader of the order pays for
+// it in bytes.
+const maxOrderPhotos = 6
+
+// normalizeOrderPhotos makes the list and the single field agree, whichever one
+// the client actually sent.
+//
+// Old apps post `image_url`; new ones post `images`. Rather than making every
+// reader — the worker's card, the firm's panel, the admin list — know which
+// kind of client made the order, the two are reconciled once, here: the list is
+// the truth and `image_url` is always its first entry.
+func normalizeOrderPhotos(o *models.Order) {
+	if len(o.Images) == 0 && o.ImageURL != "" {
+		o.Images = []string{o.ImageURL}
+	}
+	if len(o.Images) > maxOrderPhotos {
+		o.Images = o.Images[:maxOrderPhotos]
+	}
+	if o.Images == nil {
+		o.Images = []string{}
+	}
+	if len(o.Images) > 0 {
+		o.ImageURL = o.Images[0]
+	} else {
+		o.ImageURL = ""
+	}
 }
 
 // CompanyOrderInput is the payload for a direct order to a company. The company
@@ -166,6 +208,7 @@ type CompanyOrderInput struct {
 	Description string
 	Phone       string
 	Name        string
+	Images      []string
 	ImageURL    string
 	Lat         float64
 	Lng         float64
@@ -193,6 +236,14 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 	if s.CompanyIsBusy(cp.ID) {
 		return nil, ErrCompanyBusy
 	}
+	// A firm whose subscription has run out stays on the list — it is a real
+	// business a customer may want to find — but it cannot be sent a job it is
+	// not allowed to accept. Refusing here is the honest version of that: the
+	// customer is told now, rather than after waiting on an order the firm can
+	// only ever decline.
+	if !cp.CanTakeWork() {
+		return nil, ErrCompanyUnavailable
+	}
 	// Fall back to the account name when the form left it blank.
 	name := in.Name
 	if name == "" {
@@ -207,6 +258,7 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 		Gender:        "any",
 		Description:   in.Description,
 		ImageURL:      in.ImageURL,
+		Images:        in.Images,
 		CustomerName:  name,
 		CustomerPhone: in.Phone,
 		// The company publishes its fee; the customer books at that price.
@@ -223,9 +275,11 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 	// and a 201: the customer got the "sent!" screen, the firm got nothing, and
 	// there was no record anywhere of an order that never existed. A write that
 	// did not happen has to be an error the caller can see.
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)",
+	normalizeOrderPhotos(o)
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
 		o.ID, o.CustomerID, "", o.CompanyID, "", o.Gender, o.Description, o.ImageURL,
-		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", nil, 0, o.CreatedAt, o.CustomerName, o.Price, "[]"); err != nil {
+		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", nil, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
+		marshalJSON(o.Images)); err != nil {
 		log.Printf("store: company order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -257,17 +311,19 @@ func (s *Store) CompanyRespond(orderID, companyUserID string, accept bool) (*mod
 	if s.CompanyIsBusy(cp.ID) {
 		return nil, ErrConflict
 	}
-	if !s.walletCanAccept(companyUserID) {
-		return nil, ErrInsufficientBalance
+	// A firm pays by the month, not by the job: what gates it here is whether it
+	// still holds a subscription, or is inside its free trial jobs. There is no
+	// commission on a company order at all — the month has already been paid for
+	// — so the wallet is not consulted and nothing is deducted.
+	if !cp.CanTakeWork() {
+		return nil, ErrSubscriptionExpired
 	}
-	commission := o.Price * int64(s.settings.CommissionPercent) / 100
-	s.deductCommission(companyUserID, commission)
+	s.chargeCompanyAcceptance(cp)
 
 	o.Status = models.StatusAccepted
 	o.WorkerPhone = cp.Phone
-	o.CommissionAmount = commission
-	s.db.Exec("UPDATE orders SET status=$1, worker_phone=$2, commission_amount=$3 WHERE id=$4",
-		o.Status, o.WorkerPhone, commission, orderID)
+	s.db.Exec("UPDATE orders SET status=$1, worker_phone=$2 WHERE id=$3",
+		o.Status, o.WorkerPhone, orderID)
 	return o, nil
 }
 
@@ -378,8 +434,11 @@ func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 		if s.WorkerIsBusy(wp.UserID) {
 			continue
 		}
-		// An empty wallet cannot accept, so ringing that phone is pure noise.
-		if !s.walletCanAccept(wp.UserID) {
+		// A worker who could not accept if they tried is pure noise on the
+		// broadcast — but a brand-new one with free jobs left can accept with an
+		// empty wallet, which is the whole point of the trial, so this asks the
+		// same question Accept will ask rather than only looking at the money.
+		if !s.canWorkerAccept(wp) {
 			continue
 		}
 		d := geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng)
@@ -509,7 +568,7 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	if s.WorkerIsBusy(workerUserID) {
 		return nil, nil, ErrConflict
 	}
-	if !s.walletCanAccept(workerUserID) {
+	if !s.canWorkerAccept(wp) {
 		return nil, nil, ErrInsufficientBalance
 	}
 	// Commission is taken on the agreed price of this job.
@@ -532,14 +591,23 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 		// Somebody else was a fraction of a second faster.
 		return nil, nil, ErrConflict
 	}
-	// Only the winner pays the commission.
-	s.deductCommission(workerUserID, commission)
+	// Only the winner pays — and a worker still inside their three free jobs
+	// spends one of those instead of the commission. The order row is corrected
+	// afterwards rather than before, because whether the job is free is only
+	// settled by the atomic consume inside the call.
+	charged := s.chargeWorkerAcceptance(wp, commission)
+	if charged != commission {
+		s.db.Exec("UPDATE orders SET commission_amount=$1 WHERE id=$2", charged, orderID)
+	}
 
 	o.Status = models.StatusAccepted
 	o.WorkerID = workerUserID
 	o.WorkerPhone = wp.Phone
 	o.InviteExpiresAt = nil
-	o.CommissionAmount = commission
+	o.CommissionAmount = charged
+	// The profile handed back is what the app redraws its banner from, so it has
+	// to know a trial job was just spent.
+	wp.FreeOrdersUsed = s.freeOrdersUsed(WorkerTrialKey(wp.PassportSeries))
 	return o, wp, nil
 }
 

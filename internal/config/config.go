@@ -17,6 +17,23 @@ type Config struct {
 	CommissionPercent int
 	MinBalance        int64
 
+	// FreeOrderLimit is how many jobs a brand-new provider may accept before the
+	// money rules apply — three, so somebody the office just signed up can try
+	// the app out with an empty wallet. Counted per identity document (a worker's
+	// passport, a firm's INN), never per account, so deleting the profile and
+	// opening it again does not hand out three more.
+	FreeOrderLimit int
+	// CompanyMonthlyPrice is the default price of one month of a firm's
+	// subscription. A firm does not pay commission per job — it pays for months,
+	// and the admin sets what a month costs.
+	CompanyMonthlyPrice int64
+	// CompanyDiscountPercent is the discount offered on a subscription by
+	// default. The admin can override it on each payment.
+	CompanyDiscountPercent int
+	// SubscriptionWarnDays is how many days before a subscription runs out the
+	// firm is warned.
+	SubscriptionWarnDays int
+
 	// Database (individual fields assembled into a DSN).
 	DBHost     string
 	DBPort     string
@@ -29,6 +46,25 @@ type Config struct {
 	AdminEmail    string
 	AdminPassword string
 	AdminPhone    string
+
+	// Atmos payment gateway. With ATMOS_BASE_URL empty the server behaves as it
+	// did before there was a gateway: DEV_MODE credits a top-up straight away,
+	// and outside DEV_MODE a top-up is refused rather than silently pretending.
+	//
+	// Paths and the signature recipe are per-merchant, so they live here rather
+	// than compiled in — see internal/atmos for what to confirm against your own
+	// documentation.
+	AtmosBaseURL        string
+	AtmosCheckoutURL    string
+	AtmosConsumerKey    string
+	AtmosConsumerSecret string
+	AtmosStoreID        string
+	AtmosTerminalID     string
+	// AtmosAPIKey is the key callbacks are signed with — a different secret from
+	// the consumer one, out of the merchant cabinet.
+	AtmosAPIKey string
+	// AtmosRedirectURL is the deep link Atmos returns the payer's browser to.
+	AtmosRedirectURL string
 
 	// Eskiz SMS provider.
 	EskizBaseURL  string
@@ -65,6 +101,11 @@ func Load() Config {
 		CommissionPercent: envInt("COMMISSION_PERCENT", 10),
 		MinBalance:        int64(envInt("MIN_BALANCE", 10000)),
 
+		FreeOrderLimit:         envInt("FREE_ORDER_LIMIT", 3),
+		CompanyMonthlyPrice:    int64(envInt("COMPANY_MONTHLY_PRICE", 300000)),
+		CompanyDiscountPercent: envInt("COMPANY_DISCOUNT_PERCENT", 0),
+		SubscriptionWarnDays:   envInt("SUBSCRIPTION_WARN_DAYS", 7),
+
 		DBHost:     env("DB_HOST", "localhost"),
 		DBPort:     env("DB_PORT", "5432"),
 		DBUser:     env("DB_USER", "prostaff"),
@@ -75,6 +116,15 @@ func Load() Config {
 		AdminEmail:    env("ADMIN_EMAIL", "admin@prostaff.uz"),
 		AdminPassword: env("ADMIN_PASSWORD", "admin123"),
 		AdminPhone:    env("ADMIN_PHONE", "998900000000"),
+
+		AtmosBaseURL:        env("ATMOS_BASE_URL", ""),
+		AtmosCheckoutURL:    env("ATMOS_CHECKOUT_URL", "https://checkout.pays.uz/invoice/get"),
+		AtmosConsumerKey:    env("ATMOS_CONSUMER_KEY", ""),
+		AtmosConsumerSecret: env("ATMOS_CONSUMER_SECRET", ""),
+		AtmosStoreID:        env("ATMOS_STORE_ID", ""),
+		AtmosTerminalID:     env("ATMOS_TERMINAL_ID", ""),
+		AtmosAPIKey:         env("ATMOS_API_KEY", ""),
+		AtmosRedirectURL:    env("ATMOS_REDIRECT_URL", ""),
 
 		EskizBaseURL:  env("ESKIZ_BASE_URL", ""),
 		EskizToken:    env("ESKIZ_TOKEN", ""),

@@ -177,7 +177,7 @@ func (s *Store) AdminAdjustBalance(userID string, amount int64) (*models.Wallet,
 	s.createWalletIfNotExists(userID)
 	s.TopupWallet(userID, amount)
 	if amount > 0 {
-		s.CreatePayment(userID, "admin", amount)
+		s.CreatePayment(userID, "admin", amount, models.PurposeWallet)
 	}
 	w, _ := s.GetWallet(userID)
 	return w, nil
@@ -256,6 +256,8 @@ type AdminWorkerInput struct {
 	CategoryIDs []string
 	CreditLimit int64
 	Online      bool
+	// PassportSeries is required — see WorkerInput.
+	PassportSeries string
 
 	// The public profile. Optional here: the office can open the account first
 	// and the worker fills in their photo and bio from their own panel.
@@ -272,6 +274,16 @@ func (s *Store) AdminCreateWorker(in AdminWorkerInput) (*models.User, error) {
 	phone := normalizePhone(in.Phone)
 	if phone == "" || in.FullName == "" {
 		return nil, ErrBadRequest
+	}
+	// The paperwork is judged before the account is opened. GetOrCreateUserByPhone
+	// below *creates* a customer, so a form rejected further down would leave a
+	// bare account behind for a worker who was never registered.
+	passport := NormalizePassport(in.PassportSeries)
+	if !ValidPassport(passport) {
+		return nil, ErrInvalidPassport
+	}
+	if s.passportTaken(passport, "") {
+		return nil, ErrDuplicatePassport
 	}
 	u, _ := s.GetOrCreateUserByPhone(phone)
 	if u == nil {
@@ -291,6 +303,7 @@ func (s *Store) AdminCreateWorker(in AdminWorkerInput) (*models.User, error) {
 	s.createWalletIfNotExists(u.ID)
 
 	if _, err := s.CreateWorkerProfile(u.ID, WorkerInput{
+		PassportSeries:  in.PassportSeries,
 		FullName:        in.FullName,
 		Phone:           phone,
 		Gender:          in.Gender,
@@ -327,8 +340,12 @@ func (s *Store) AdminCreateWorker(in AdminWorkerInput) (*models.User, error) {
 // AdminWorkerPatch is the full worker record as the office may correct it —
 // including the fields the worker cannot touch themselves.
 type AdminWorkerPatch struct {
-	FullName    *string
-	Phone       *string
+	// PassportSeries can be corrected, which is why this patch exists at all for
+	// it: a mistyped series is a worker filed under somebody else's document.
+	PassportSeries *string
+
+	FullName *string
+	Phone    *string
 	Gender      *string
 	Age         *int
 	PriceMin    *int64
@@ -357,6 +374,22 @@ func (s *Store) AdminUpdateWorker(idOrUser string, p AdminWorkerPatch) (*models.
 	wp, ok := s.GetWorkerByUser(uid)
 	if !ok {
 		return nil, ErrNotFound
+	}
+	if p.PassportSeries != nil {
+		series := NormalizePassport(*p.PassportSeries)
+		if !ValidPassport(series) {
+			return nil, ErrInvalidPassport
+		}
+		if s.passportTaken(series, uid) {
+			return nil, ErrDuplicatePassport
+		}
+		// Written on its own so the trial counter follows the correction: the
+		// ledger is keyed on the series, so the worker's used-count is now read
+		// from the document they actually hold.
+		if _, err := s.db.Exec("UPDATE workers SET passport_series=$1 WHERE user_id=$2", series, uid); err != nil {
+			return nil, ErrDuplicatePassport
+		}
+		wp.PassportSeries = series
 	}
 	if p.FullName != nil {
 		wp.FullName = *p.FullName
@@ -414,6 +447,11 @@ type AdminCompanyInput struct {
 	Lng         float64
 	CreditLimit int64
 	Online      bool
+	// INN is required — see CompanyInput.
+	INN string
+	// SubscriptionMonths, when set, sells the firm its first months in the same
+	// call that opens the account. Zero leaves it on its free trial jobs.
+	SubscriptionMonths int
 
 	AvatarURL       string
 	Address         string
@@ -431,6 +469,14 @@ func (s *Store) AdminCreateCompany(in AdminCompanyInput) (*models.User, error) {
 	if phone == "" || in.Name == "" || in.Price <= 0 {
 		return nil, ErrBadRequest
 	}
+	// Same order as for a worker: the INN is judged before an account exists.
+	inn := NormalizeINN(in.INN)
+	if !ValidINN(inn) {
+		return nil, ErrInvalidINN
+	}
+	if s.innTaken(inn, "") {
+		return nil, ErrDuplicateINN
+	}
 	u, _ := s.GetOrCreateUserByPhone(phone)
 	if u == nil {
 		return nil, ErrBadRequest
@@ -445,6 +491,7 @@ func (s *Store) AdminCreateCompany(in AdminCompanyInput) (*models.User, error) {
 	s.createWalletIfNotExists(u.ID)
 
 	if _, err := s.CreateCompanyProfile(u.ID, CompanyInput{
+		INN:             in.INN,
 		Name:            in.Name,
 		Phone:           phone,
 		Description:     in.Description,
@@ -468,6 +515,13 @@ func (s *Store) AdminCreateCompany(in AdminCompanyInput) (*models.User, error) {
 	s.ChangeRole(u.ID, models.RoleCompany, "add")
 	if in.CreditLimit > 0 {
 		s.SetWalletCreditLimit(u.ID, in.CreditLimit)
+	}
+	// A firm that paid at the counter starts subscribed. One that did not starts
+	// on its free jobs, which is exactly what the office wants for a trial.
+	if in.SubscriptionMonths > 0 {
+		if cp, ok := s.getCompanyByUser(u.ID); ok {
+			s.ExtendCompanySubscription(cp.ID, SubscriptionExtension{Months: in.SubscriptionMonths})
+		}
 	}
 	if in.Online {
 		s.SetCompanyStatus(u.ID, true)
@@ -675,8 +729,13 @@ func (s *Store) ListAllOrders(period, status string) []AdminOrder {
 type Finance struct {
 	Payments []models.Payment `json:"payments"`
 	Totals   struct {
-		Topups     int64 `json:"topups"`
-		Commission int64 `json:"commission"`
+		Topups int64 `json:"topups"`
+		// Subscriptions is what firms have paid for months. Kept apart from
+		// top-ups because it is a different business: a top-up is a worker's own
+		// money sitting in a wallet waiting to be spent on commission, while a
+		// subscription is revenue the moment it is taken.
+		Subscriptions int64 `json:"subscriptions"`
+		Commission    int64 `json:"commission"`
 	} `json:"totals"`
 	CommissionPercent int `json:"commission_percent"`
 }
@@ -687,10 +746,17 @@ func (s *Store) FinanceOverview() Finance {
 	if f.Payments == nil {
 		f.Payments = []models.Payment{}
 	}
+	// Only settled money counts. A payment that is still pending is somebody
+	// looking at an invoice page, and a cancelled one never happened.
 	for _, p := range f.Payments {
-		if p.Status == "success" || p.Status == "completed" {
-			f.Totals.Topups += p.Amount
+		if p.Status != models.PaymentSuccess && p.Status != "completed" {
+			continue
 		}
+		if p.Purpose == models.PurposeSubscription {
+			f.Totals.Subscriptions += p.Amount
+			continue
+		}
+		f.Totals.Topups += p.Amount
 	}
 	// Sum commission from orders.
 	s.db.QueryRow("SELECT COALESCE(SUM(commission_amount),0) FROM orders").Scan(&f.Totals.Commission)
@@ -701,4 +767,9 @@ func (s *Store) FinanceOverview() Finance {
 type SettingsPatch struct {
 	CommissionPercent *int
 	MinBalance        *int64
+
+	FreeOrderLimit         *int
+	CompanyMonthlyPrice    *int64
+	CompanyDiscountPercent *int
+	SubscriptionWarnDays   *int
 }

@@ -1030,21 +1030,31 @@ paths:
     post:
       tags: [Wallet]
       summary: Top up wallet
-      description: In dev mode the amount is credited instantly.
+      description: |
+        Opens a payment at Atmos and returns `payment_url` — the hosted invoice
+        page the payer must be sent to. Nothing is credited here: the balance
+        moves only when the signed callback lands, so the app polls
+        `GET /payments/{id}` after the page closes.
+
+        With no gateway configured and DEV_MODE on, the amount is credited
+        straight away and no `payment_url` comes back. With DEV_MODE off it is
+        refused rather than pretending.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [provider, amount]
+              required: [amount]
               properties:
-                provider:
-                  type: string
-                  enum: [click, payme]
                 amount:
                   type: integer
-                  description: Amount in so'm
+                  description: Amount in whole so'm
+                provider:
+                  type: string
+                  description: |
+                    Accepted and ignored — older builds of the app send
+                    "click"/"payme". There is one gateway now.
       responses:
         "200":
           description: Top-up result
@@ -1346,6 +1356,16 @@ paths:
                 $ref: "#/components/schemas/Finance"
 
   /admin/settings:
+    get:
+      tags: [Admin]
+      summary: Current platform settings
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Settings"
     patch:
       tags: [Admin]
       summary: Update platform settings
@@ -1359,6 +1379,16 @@ paths:
                   type: integer
                 min_balance:
                   type: integer
+                free_order_limit:
+                  type: integer
+                  description: Jobs a new worker/firm may accept before the money rules apply
+                company_monthly_price:
+                  type: integer
+                  description: Price of one month of a firm's subscription, in so'm
+                company_discount_percent:
+                  type: integer
+                subscription_warn_days:
+                  type: integer
       responses:
         "200":
           description: Updated settings
@@ -1366,6 +1396,475 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Settings"
+
+  /admin/companies/{id}/subscription:
+    post:
+      tags: [Admin]
+      summary: Sell a firm more months
+      description: |
+        A company does not pay commission per job — it pays for months, and this
+        is where they are bought. Months are added to whatever the firm has left,
+        so renewing early keeps the remaining days. `price_per_month` and
+        `discount_percent` default to the current platform settings; both are
+        stored on the payment so a later price change cannot rewrite it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Company profile id (the owning user id is also accepted)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [months]
+              properties:
+                months:
+                  type: integer
+                  minimum: 1
+                  maximum: 60
+                price_per_month:
+                  type: integer
+                discount_percent:
+                  type: integer
+      responses:
+        "200":
+          description: The purchase and the updated company
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscription:
+                    $ref: "#/components/schemas/CompanySubscription"
+                  company:
+                    $ref: "#/components/schemas/CompanyProfile"
+
+  /admin/companies/{id}/subscriptions:
+    get:
+      tags: [Admin]
+      summary: A firm's subscription history
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Purchases, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/CompanySubscription"
+
+  /admin/payments:
+    get:
+      tags: [Admin]
+      summary: Every payment attempt, and what went wrong with it
+      description: |
+        Not just the money that arrived. A payment that never opened at the
+        gateway, a callback whose signature did not verify, an amount that
+        disagreed with what was asked for, months that were paid for and could
+        not be applied — each carries the reason in `error`, in words, so
+        somebody answering the phone can read it.
+
+        `status=problem` is the filter the office wants: everything that failed
+        plus anything that settled with a note on it.
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [problem, pending, success, canceled, failed]
+        - name: purpose
+          in: query
+          schema:
+            type: string
+            enum: [wallet, subscription]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+            maximum: 500
+      responses:
+        "200":
+          description: The payment log and its counters
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payments:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/Payment"
+                        - type: object
+                          properties:
+                            user_name: { type: string }
+                            user_phone: { type: string }
+                            company_name: { type: string }
+                  totals:
+                    type: object
+                    properties:
+                      settled:
+                        type: integer
+                        description: Everything that has actually been paid, in so'm
+                      pending: { type: integer }
+                      failed: { type: integer }
+                      problems:
+                        type: integer
+                        description: Anything carrying an error note, whatever its status
+
+  /admin/subscriptions:
+    get:
+      tags: [Admin]
+      summary: Every tariff ever sold, newest first
+      description: |
+        Who bought what, for how long, and what they paid — plus the two counters
+        that decide whether anybody needs ringing this week.
+
+        The figures come off the purchase rows, not today's tariff card: a price
+        the office changed last week must not rewrite what somebody paid last
+        month, which is why they are copied onto the row at the time of sale.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 200
+            maximum: 500
+      responses:
+        "200":
+          description: Sales history and totals
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  subscriptions:
+                    type: array
+                    items:
+                      allOf:
+                        - $ref: "#/components/schemas/CompanySubscription"
+                        - type: object
+                          properties:
+                            company_name: { type: string }
+                            company_phone: { type: string }
+                            user_id: { type: string }
+                            inn: { type: string }
+                  totals:
+                    type: object
+                    properties:
+                      sold:
+                        type: integer
+                        description: Everything ever taken for subscriptions, in so'm
+                      count: { type: integer }
+                      active_firms:
+                        type: integer
+                        description: Firms whose subscription has not run out
+                      expiring_firms:
+                        type: integer
+                        description: Of those, the ones inside the notice window
+
+  /admin/subscription-plans:
+    get:
+      tags: [Admin]
+      summary: Every tariff, including retired ones
+      responses:
+        "200":
+          description: Tariffs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubscriptionPlan"
+    post:
+      tags: [Admin]
+      summary: Add a tariff
+      description: |
+        Length and price. There is no feature list to set — the plans include
+        the same things, and the only thing a longer term buys is a lower price
+        per month.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [months, price]
+              properties:
+                months: { type: integer, minimum: 1, maximum: 60 }
+                price: { type: integer, description: "Whole amount for the whole term" }
+                old_price: { type: integer, description: "Struck-through figure; 0 for none" }
+                title: { type: string }
+                active: { type: boolean }
+                sort: { type: integer }
+      responses:
+        "201":
+          description: The new tariff
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionPlan"
+
+  /admin/subscription-plans/{id}:
+    patch:
+      tags: [Admin]
+      summary: Re-price or retire a tariff
+      description: |
+        Not retroactive, and does not need to be: what a firm paid is stored on
+        its own payment row, so last month's sale keeps last month's number.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                months: { type: integer }
+                price: { type: integer }
+                old_price: { type: integer }
+                title: { type: string }
+                active: { type: boolean }
+                sort: { type: integer }
+      responses:
+        "200":
+          description: The updated tariff
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubscriptionPlan"
+    delete:
+      tags: [Admin]
+      summary: Remove a tariff
+      description: |
+        Safe at any time: a plan is only read to price a checkout, and the months
+        a firm already bought live on its own record.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Deleted
+
+  /admin/users/{id}/free-orders:
+    post:
+      tags: [Admin]
+      summary: Set how many trial jobs the account has spent
+      description: |
+        The trial counter is keyed on the identity document (a worker's passport
+        series, a firm's INN) and outlives the profile on purpose, so a free job
+        spent by mistake can only be given back here.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum: [worker, company]
+                  default: worker
+                used:
+                  type: integer
+                  minimum: 0
+      responses:
+        "200":
+          description: The updated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+
+  # ──────────────────────────── Payments ───────────────────────
+  /payments:
+    get:
+      tags: [Wallet]
+      summary: The caller's own payment history
+      responses:
+        "200":
+          description: Payments, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Payment"
+
+  /payments/{id}:
+    get:
+      tags: [Wallet]
+      summary: One payment — "did my money land?"
+      description: |
+        Polled by the app after the Atmos invoice page closes. The browser
+        coming back proves nothing: the bank confirms a payment to this server,
+        not to the phone, so `status` here is the only answer that counts.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The payment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Payment"
+        "404":
+          description: Not found, or not the caller's
+
+  /company/subscription/plans:
+    get:
+      tags: [Company]
+      summary: The tariffs on offer
+      description: |
+        The plans differ in length and nothing else — every subscribed firm gets
+        the same platform — so a longer term simply costs less per month. Read on
+        every open rather than cached: the prices are the office's to change, and
+        a stale card would mean a firm agreeing to one number and being charged
+        another.
+      responses:
+        "200":
+          description: Active tariffs, cheapest term first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plans:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/SubscriptionPlan"
+                  payments_enabled: { type: boolean }
+
+  /company/subscription/checkout:
+    post:
+      tags: [Company]
+      summary: A firm buys a tariff
+      description: |
+        Opens a payment at the price held on the plan — a client that could name
+        its own price could buy a year for a so'm — and returns the Atmos invoice
+        URL. The months are only added when the signed callback lands.
+
+        `months` is the compatibility path for an app built before tariffs
+        existed: it is matched against an active plan of exactly that length, and
+        never priced arithmetically.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                plan_id:
+                  type: string
+                months:
+                  type: integer
+                  minimum: 1
+                  maximum: 60
+      responses:
+        "200":
+          description: The pending payment and where to send the payer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  payment:
+                    $ref: "#/components/schemas/Payment"
+                  payment_url:
+                    type: string
+                  company:
+                    $ref: "#/components/schemas/CompanyProfile"
+        "402":
+          description: Payments are not configured
+        "502":
+          description: The gateway could not be reached
+
+  /payments/atmos/callback:
+    post:
+      tags: [Wallet]
+      summary: Atmos settlement callback — the only thing that moves money
+      security: []
+      description: |
+        Register this URL in the merchant cabinet. It is public because Atmos
+        holds no credentials of ours; what makes it safe is the signature,
+        checked before anything is looked up:
+
+            sign = md5(store_id + transaction_id + invoice + amount + api_key)
+
+        Safe to receive more than once — settlement is a single guarded UPDATE,
+        so a retry credits nothing and still answers `status: 1`. `amount` is in
+        tiyin.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                store_id: { type: string }
+                transaction_id: { type: string }
+                invoice: { type: string }
+                amount: { type: string, description: "In tiyin" }
+                sign: { type: string }
+      responses:
+        "200":
+          description: |
+            Always 200. `status: 1` means handled (including a duplicate);
+            `status: 0` means the signature did not verify and nothing was done.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: integer, enum: [0, 1] }
+                  message: { type: string }
+
+  # ──────────────────────────── Alerts ─────────────────────────
+  /alerts:
+    get:
+      tags: [Notifications]
+      summary: Standing warnings for the caller
+      description: |
+        The *state* the account is in, as opposed to /notifications, which is a
+        list of things that happened. Out of free jobs and under the minimum
+        balance, or a subscription about to lapse — conditions that stay true
+        until they are dealt with, which is why the app draws them as a banner
+        rather than an inbox row.
+      responses:
+        "200":
+          description: Active alerts (empty when the account is in good standing)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Alert"
 
   # ──────────────────────────── Realtime ───────────────────────
   /events:
@@ -1588,6 +2087,18 @@ components:
           description: Portfolio of previous work
           items:
             type: string
+        passport_series:
+          type: string
+          description: |
+            The worker's passport (AA1234567) — required when the account is
+            opened, unique across the platform, and the key the free trial jobs
+            below are counted under. Admin- and self-read only; stripped from
+            every public profile.
+        free_orders_used:
+          type: integer
+        free_orders_limit:
+          type: integer
+          description: Jobs this worker may accept with an empty wallet
         created_at:
           type: string
           format: date-time
@@ -1646,9 +2157,119 @@ components:
           type: string
         website:
           type: string
+        inn:
+          type: string
+          description: |
+            The firm's tax number — required at creation, unique, and what its
+            free orders are counted under. Admin- and self-read only.
+        free_orders_used:
+          type: integer
+        free_orders_limit:
+          type: integer
+        subscription_until:
+          type: string
+          format: date-time
+          description: |
+            When the firm's paid period ends; absent for a firm that has never
+            bought one. A firm pays by the month rather than a commission per
+            job, so this date — not a wallet balance — is what lets it accept
+            work. Admin- and self-read only.
+        subscription_active:
+          type: boolean
+        subscription_days_left:
+          type: integer
         created_at:
           type: string
           format: date-time
+
+    SubscriptionPlan:
+      type: object
+      description: |
+        One tariff card. Plans differ in length and nothing else, so `price` is
+        the whole amount for the whole term and a longer term is simply cheaper
+        per month. `old_price` is presentational — struck through on the card,
+        never charged.
+      properties:
+        id: { type: string }
+        months: { type: integer }
+        price:
+          type: integer
+          description: The whole amount for the whole term, in so'm
+        old_price:
+          type: integer
+          description: Struck-through figure on the card; 0 means none
+        title:
+          type: string
+          description: Optional label; empty lets the app name the plan from its length
+        active: { type: boolean }
+        sort: { type: integer }
+        per_month:
+          type: integer
+          description: Derived — what the plan works out to per month
+        discount_percent:
+          type: integer
+          description: Derived from old_price
+        created_at:
+          type: string
+          format: date-time
+
+    CompanySubscription:
+      type: object
+      description: One purchase of months, with the price and discount of the day it was sold.
+      properties:
+        id:
+          type: string
+        company_id:
+          type: string
+        months:
+          type: integer
+        price_per_month:
+          type: integer
+        discount_percent:
+          type: integer
+        amount:
+          type: integer
+          description: What was actually charged, after the discount
+        starts_at:
+          type: string
+          format: date-time
+        ends_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    Alert:
+      type: object
+      description: A standing condition on the account, computed on read.
+      properties:
+        type:
+          type: string
+          enum:
+            [
+              trial.left,
+              trial.exhausted,
+              wallet.low_balance,
+              subscription.expiring,
+              subscription.expired,
+              subscription.missing,
+            ]
+        level:
+          type: string
+          enum: [info, warning, danger]
+        title:
+          type: string
+        body:
+          type: string
+        action:
+          type: string
+          enum: [topup, subscription]
+          description: What the banner's button should do; absent means no button
+        role:
+          type: string
+          enum: [worker, company]
+          description: The hat the alert is about, so each panel shows its own
 
     Order:
       type: object
@@ -1670,6 +2291,16 @@ components:
           type: string
         image_url:
           type: string
+          description: |
+            The first photo. Kept for apps built before an order could carry
+            several; always `images[0]`.
+        images:
+          type: array
+          description: |
+            Every photo the customer attached — often a better description of
+            the job than the words. Capped at 6; anything past that is trimmed.
+          items:
+            type: string
         customer_phone:
           type: string
         worker_phone:
@@ -1745,11 +2376,40 @@ components:
           type: string
         provider:
           type: string
-          enum: [click, payme]
+          description: "`atmos` for gateway payments; `admin` / `dev` for money booked by hand"
         amount:
           type: integer
+          description: In whole so'm (Atmos counts in tiyin; the conversion is server-side)
         status:
           type: string
+          enum: [pending, success, canceled, failed]
+          description: |
+            `failed` is a payment that could not be opened at the gateway, or one
+            the gateway refused — distinct from `canceled`, which is a person
+            changing their mind.
+        error:
+          type: string
+          description: |
+            What went wrong, in words. Set on a failure and also on a payment
+            that settled with something odd about it. Empty on an ordinary
+            payment.
+        purpose:
+          type: string
+          enum: [wallet, subscription]
+        months:
+          type: integer
+          description: Months bought, on a subscription payment
+        external_id:
+          type: string
+          description: The gateway's transaction id — what a callback arrives under
+        pay_url:
+          type: string
+          description: |
+            The hosted invoice page. Only present in the response that opened
+            the payment; it is not stored.
+        paid_at:
+          type: string
+          format: date-time
         created_at:
           type: string
           format: date-time
@@ -1820,4 +2480,14 @@ components:
         commission_percent:
           type: integer
         min_balance:
+          type: integer
+        free_order_limit:
+          type: integer
+          description: Jobs a new worker/firm may accept before the money rules apply
+        company_monthly_price:
+          type: integer
+          description: Price of one month of a firm's subscription, in so'm
+        company_discount_percent:
+          type: integer
+        subscription_warn_days:
           type: integer

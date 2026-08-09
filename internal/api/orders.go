@@ -14,11 +14,14 @@ import (
 func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var body struct {
-		CategoryID  string  `json:"category_id"`
-		Gender      string  `json:"gender"`
-		Description string  `json:"description"`
-		ImageURL    string  `json:"image_url"`
-		Phone       string  `json:"phone"`
+		CategoryID  string `json:"category_id"`
+		Gender      string `json:"gender"`
+		Description string `json:"description"`
+		// Both are accepted: an app built before an order could carry several
+		// photos sends `image_url`, and the store reconciles the two.
+		Images   []string `json:"images"`
+		ImageURL string   `json:"image_url"`
+		Phone    string   `json:"phone"`
 		Price       int64   `json:"price"`
 		Lat         float64 `json:"lat"`
 		Lng         float64 `json:"lng"`
@@ -33,6 +36,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		CategoryID:  body.CategoryID,
 		Gender:      body.Gender,
 		Description: body.Description,
+		Images:      body.Images,
 		ImageURL:    body.ImageURL,
 		Phone:       body.Phone,
 		Price:       body.Price,

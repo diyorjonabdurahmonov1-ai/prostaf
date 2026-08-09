@@ -269,6 +269,147 @@ func migrate(db *sql.DB) {
 			ratings_count = (SELECT COUNT(*) FROM ratings r
 				WHERE r.to_user_id = c.user_id AND r.target_role = 'company')`,
 
+		// Who the provider actually is, on paper.
+		//
+		// The office takes a worker's passport series and a firm's INN when it
+		// opens the account, and both are unique across the platform. That is what
+		// makes the three free jobs below safe to give away: the counter hangs off
+		// the document, so the same person cannot collect another three by having
+		// their profile deleted and re-created under a new phone number.
+		//
+		// Existing rows keep '' — a record from before this was asked for has no
+		// document on file, and the partial indexes below let any number of them
+		// coexist while still refusing a second worker with the same passport.
+		`ALTER TABLE workers   ADD COLUMN IF NOT EXISTS passport_series TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS inn             TEXT NOT NULL DEFAULT ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_workers_passport
+			ON workers(passport_series) WHERE passport_series <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_inn
+			ON companies(inn) WHERE inn <> ''`,
+
+		// The free-trial ledger. `key` is the document it belongs to, prefixed by
+		// the kind of provider ('worker:AA1234567', 'company:123456789'), so a
+		// person who is both a worker and a firm gets one trial per hat.
+		//
+		// Deliberately not a column on workers/companies: the profile row is the
+		// thing an admin can delete, and this has to outlive it.
+		`CREATE TABLE IF NOT EXISTS free_trials (
+			key        TEXT PRIMARY KEY,
+			used       INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+
+		// A firm's account is not a wallet that commission is taken from — it is a
+		// subscription with an end date. `subscription_until` is that date; NULL
+		// means the firm has never paid and is still on its free jobs.
+		//
+		// `subscription_warned_at` remembers that the "7 days left" message has
+		// already gone out for the current period, so the daily check does not
+		// repeat it every morning for a week.
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS subscription_until     TIMESTAMPTZ`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS subscription_warned_at TIMESTAMPTZ`,
+
+		// Every month a firm bought, and what it paid for it. The admin sets the
+		// monthly price and may discount it, so the numbers of the day have to be
+		// stored on the row rather than recomputed from today's settings.
+		`CREATE TABLE IF NOT EXISTS company_subscriptions (
+			id               TEXT PRIMARY KEY,
+			company_id       TEXT NOT NULL,
+			months           INTEGER NOT NULL,
+			price_per_month  BIGINT NOT NULL,
+			discount_percent INTEGER NOT NULL DEFAULT 0,
+			amount           BIGINT NOT NULL,
+			starts_at        TIMESTAMPTZ NOT NULL,
+			ends_at          TIMESTAMPTZ NOT NULL,
+			created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_company_subs ON company_subscriptions(company_id, created_at)`,
+
+		// The tariffs a firm chooses between.
+		//
+		// They differ in length, not in what they include — every subscribed firm
+		// gets the same platform — so a longer one is simply cheaper per month.
+		// That is why the price is stored per plan rather than computed from a
+		// monthly rate: "three months for 200 000" is a number the office decides,
+		// not one arithmetic should be deriving.
+		//
+		// `old_price` is what the card shows struck through. It is presentational
+		// and never charged; zero means no strike-through.
+		`CREATE TABLE IF NOT EXISTS subscription_plans (
+			id         TEXT PRIMARY KEY,
+			months     INTEGER NOT NULL,
+			price      BIGINT NOT NULL,
+			old_price  BIGINT NOT NULL DEFAULT 0,
+			title      TEXT NOT NULL DEFAULT '',
+			active     BOOLEAN NOT NULL DEFAULT TRUE,
+			sort       INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_plans_active ON subscription_plans(active, sort)`,
+
+		// Firms that were already on the platform when billing arrived get a
+		// month, once.
+		//
+		// Without this the rule would apply retroactively: every existing firm has
+		// no INN (so no free jobs) and no subscription (so no paid ones), and the
+		// deploy that introduced this would have stopped all of them taking work
+		// with no warning and nothing they could do about it. A month is long
+		// enough for the office to call each of them and sell them a real one, and
+		// the seven-day notice fires inside it exactly as it does for anybody
+		// else.
+		//
+		// The flag below is what makes it once rather than once per restart —
+		// `subscription_until IS NULL` alone would hand thirty free days to every
+		// firm opened on a trial after this shipped, on the next deploy.
+		`UPDATE companies SET subscription_until = NOW() + INTERVAL '30 days'
+		 WHERE subscription_until IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'company_billing_grace_applied')`,
+		`INSERT INTO settings (key, value) VALUES ('company_billing_grace_applied', 'true')
+		 ON CONFLICT (key) DO NOTHING`,
+
+		// A payment is now a real thing with a life: opened at the gateway,
+		// pending while the payer is on Atmos's page, and settled — once — by a
+		// signed callback.
+		//
+		// `external_id` is Atmos's transaction id and carries a unique index,
+		// which is what makes a repeated callback (Atmos retries) harmless: the
+		// second one matches a row that is no longer pending and credits nothing.
+		//
+		// `purpose` and `months` are what the money was for. Without them a
+		// callback knows an amount and an account and has no idea whether it just
+		// bought a worker some balance or a firm three months.
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS external_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS purpose     TEXT NOT NULL DEFAULT 'wallet'`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS months      INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS paid_at     TIMESTAMPTZ`,
+		// Why a payment did not work.
+		//
+		// Until this column existed, a failure was a line in the server log and
+		// nothing else: the person who had just been charged, or had just failed
+		// to be, could ring the office and nobody there could see anything at all.
+		// The gateway refusing, a callback whose signature did not verify, an
+		// amount that disagreed with what was asked for — all of it lands here,
+		// next to the payment it happened to.
+		`ALTER TABLE payments ADD COLUMN IF NOT EXISTS error       TEXT NOT NULL DEFAULT ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_external
+			ON payments(external_id) WHERE external_id <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id, created_at)`,
+
+		// An order carries a set of photos, not one.
+		//
+		// A job is often explained better by three pictures than by a paragraph —
+		// the broken thing, the room it is in, the way in — and one slot meant the
+		// customer picked whichever single frame they thought was most important
+		// and the worker arrived without the rest.
+		//
+		// `image_url` stays and keeps holding the first photo: apps built before
+		// this read that field and nothing else, and an order that shows them no
+		// picture at all is worse than one that shows them the main one.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS images TEXT NOT NULL DEFAULT '[]'`,
+		// Existing orders keep their single photo by moving it into the list.
+		`UPDATE orders SET images = json_build_array(image_url)::text
+		 WHERE images = '[]' AND image_url <> ''`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

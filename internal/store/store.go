@@ -30,6 +30,29 @@ var (
 	ErrCompanyBanned = errors.New("company_banned")
 	ErrOwnCompany    = errors.New("own_company")
 	ErrOrderNotSaved = errors.New("order_not_saved")
+
+	// The paperwork. A worker is opened against a passport series and a firm
+	// against an INN, both unique across the platform, and the operator typing
+	// them in needs to be told which of the two things went wrong: a number that
+	// cannot be a passport at all, or one that already belongs to somebody.
+	ErrInvalidPassport   = errors.New("invalid_passport")
+	ErrDuplicatePassport = errors.New("duplicate_passport")
+	ErrInvalidINN        = errors.New("invalid_inn")
+	ErrDuplicateINN      = errors.New("duplicate_inn")
+
+	// ErrSubscriptionExpired is a firm trying to take a job with no months left
+	// and no free ones. Separate from ErrInsufficientBalance because the fix is
+	// different: a firm does not top up a wallet, it buys another month.
+	ErrSubscriptionExpired = errors.New("subscription_expired")
+
+	// ErrCompanyUnavailable is the customer's side of the same fact: the firm is
+	// listed but cannot take the job today.
+	ErrCompanyUnavailable = errors.New("company_unavailable")
+
+	// ErrPriceNotSet is a term nobody has priced: no tariff card of that length
+	// and no price named in the request. Selling it anyway would book a
+	// subscription for nothing and record it as paid.
+	ErrPriceNotSet = errors.New("price_not_set")
 )
 
 // matchRadiusKm is the smart-matchmaking radius.
@@ -49,12 +72,19 @@ func New(cfg config.Config, db *sql.DB) *Store {
 		db:  db,
 		cfg: cfg,
 		settings: models.Settings{
-			CommissionPercent: cfg.CommissionPercent,
-			MinBalance:        cfg.MinBalance,
+			CommissionPercent:      cfg.CommissionPercent,
+			MinBalance:             cfg.MinBalance,
+			FreeOrderLimit:         cfg.FreeOrderLimit,
+			CompanyMonthlyPrice:    cfg.CompanyMonthlyPrice,
+			CompanyDiscountPercent: cfg.CompanyDiscountPercent,
+			SubscriptionWarnDays:   cfg.SubscriptionWarnDays,
 		},
 	}
 	s.seed()
 	s.loadSettings()
+	// After the settings, because the starting tariffs are derived from the
+	// monthly price the office has actually configured.
+	s.seedSubscriptionPlans()
 	return s
 }
 
@@ -112,19 +142,32 @@ func (s *Store) seed() {
 }
 
 func (s *Store) loadSettings() {
-	var val string
-	if s.db.QueryRow("SELECT value FROM settings WHERE key='commission_percent'").Scan(&val) == nil {
+	loadInt := func(key string, dst *int) {
+		var val string
+		if s.db.QueryRow("SELECT value FROM settings WHERE key=$1", key).Scan(&val) != nil {
+			return
+		}
 		var v int
 		if json.Unmarshal([]byte(val), &v) == nil {
-			s.settings.CommissionPercent = v
+			*dst = v
 		}
 	}
-	if s.db.QueryRow("SELECT value FROM settings WHERE key='min_balance'").Scan(&val) == nil {
+	loadInt64 := func(key string, dst *int64) {
+		var val string
+		if s.db.QueryRow("SELECT value FROM settings WHERE key=$1", key).Scan(&val) != nil {
+			return
+		}
 		var v int64
 		if json.Unmarshal([]byte(val), &v) == nil {
-			s.settings.MinBalance = v
+			*dst = v
 		}
 	}
+	loadInt("commission_percent", &s.settings.CommissionPercent)
+	loadInt64("min_balance", &s.settings.MinBalance)
+	loadInt("free_order_limit", &s.settings.FreeOrderLimit)
+	loadInt64("company_monthly_price", &s.settings.CompanyMonthlyPrice)
+	loadInt("company_discount_percent", &s.settings.CompanyDiscountPercent)
+	loadInt("subscription_warn_days", &s.settings.SubscriptionWarnDays)
 }
 
 // ---- Users ------------------------------------------------------------------
@@ -408,15 +451,35 @@ func (s *Store) GetSettings() models.Settings {
 }
 
 func (s *Store) UpdateSettings(p SettingsPatch) models.Settings {
+	save := func(key string, v any) {
+		s.db.Exec("INSERT INTO settings (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2",
+			key, marshalJSON(v))
+	}
 	if p.CommissionPercent != nil {
 		s.settings.CommissionPercent = *p.CommissionPercent
-		s.db.Exec("INSERT INTO settings (key, value) VALUES ('commission_percent', $1) ON CONFLICT (key) DO UPDATE SET value=$1",
-			marshalJSON(*p.CommissionPercent))
+		save("commission_percent", *p.CommissionPercent)
 	}
 	if p.MinBalance != nil {
 		s.settings.MinBalance = *p.MinBalance
-		s.db.Exec("INSERT INTO settings (key, value) VALUES ('min_balance', $1) ON CONFLICT (key) DO UPDATE SET value=$1",
-			marshalJSON(*p.MinBalance))
+		save("min_balance", *p.MinBalance)
+	}
+	// A negative free-order limit would mean "owes us jobs"; zero is legitimate
+	// and means the trial is switched off for everybody signed up from now on.
+	if p.FreeOrderLimit != nil && *p.FreeOrderLimit >= 0 {
+		s.settings.FreeOrderLimit = *p.FreeOrderLimit
+		save("free_order_limit", *p.FreeOrderLimit)
+	}
+	if p.CompanyMonthlyPrice != nil && *p.CompanyMonthlyPrice >= 0 {
+		s.settings.CompanyMonthlyPrice = *p.CompanyMonthlyPrice
+		save("company_monthly_price", *p.CompanyMonthlyPrice)
+	}
+	if p.CompanyDiscountPercent != nil && *p.CompanyDiscountPercent >= 0 && *p.CompanyDiscountPercent <= 100 {
+		s.settings.CompanyDiscountPercent = *p.CompanyDiscountPercent
+		save("company_discount_percent", *p.CompanyDiscountPercent)
+	}
+	if p.SubscriptionWarnDays != nil && *p.SubscriptionWarnDays >= 0 {
+		s.settings.SubscriptionWarnDays = *p.SubscriptionWarnDays
+		save("subscription_warn_days", *p.SubscriptionWarnDays)
 	}
 	return s.settings
 }
@@ -461,31 +524,45 @@ func (s *Store) ListUsers(query string) []models.User {
 
 // ---- Payments ---------------------------------------------------------------
 
-func (s *Store) CreatePayment(userID, provider string, amount int64) *models.Payment {
+// CreatePayment records money that has already changed hands — an admin
+// crediting an account, a subscription sold at the counter. Written as settled,
+// because there is nothing left to wait for.
+//
+// Money arriving through the gateway does not come this way: it goes through
+// OpenPayment and SettlePayment in payment.go, which is where the once-only
+// guarantee lives.
+func (s *Store) CreatePayment(userID, provider string, amount int64, purpose string) *models.Payment {
+	if purpose == "" {
+		purpose = models.PurposeWallet
+	}
+	now := time.Now()
 	p := &models.Payment{
 		ID:        id.New(),
 		UserID:    userID,
 		Provider:  provider,
 		Amount:    amount,
-		Status:    "completed",
-		CreatedAt: time.Now(),
+		Status:    models.PaymentSuccess,
+		Purpose:   purpose,
+		PaidAt:    &now,
+		CreatedAt: now,
 	}
-	s.db.Exec("INSERT INTO payments (id, user_id, provider, amount, status, created_at) VALUES ($1,$2,$3,$4,$5,$6)",
-		p.ID, p.UserID, p.Provider, p.Amount, p.Status, p.CreatedAt)
+	s.db.Exec(`INSERT INTO payments (id, user_id, provider, amount, status, created_at, purpose, paid_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+		p.ID, p.UserID, p.Provider, p.Amount, p.Status, p.CreatedAt, p.Purpose, now)
 	return p
 }
 
 func (s *Store) ListPayments() []models.Payment {
-	rows, err := s.db.Query("SELECT id, user_id, provider, amount, status, created_at FROM payments ORDER BY created_at DESC")
+	rows, err := s.db.Query("SELECT " + paymentCols + " FROM payments ORDER BY created_at DESC LIMIT 500")
 	if err != nil {
 		return nil
 	}
 	defer rows.Close()
 	var out []models.Payment
 	for rows.Next() {
-		var p models.Payment
-		rows.Scan(&p.ID, &p.UserID, &p.Provider, &p.Amount, &p.Status, &p.CreatedAt)
-		out = append(out, p)
+		if p, err := scanPayment(rows); err == nil {
+			out = append(out, *p)
+		}
 	}
 	return out
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"sort"
 	"time"
 
@@ -20,6 +21,9 @@ type WorkerInput struct {
 	Lat         float64
 	Lng         float64
 	CategoryIDs []string
+	// PassportSeries is required: it is the worker's identity on the platform and
+	// the key their free trial jobs are counted under.
+	PassportSeries string
 	// The public half of the record — everything a customer reads before they
 	// let this person into their home.
 	AvatarURL       string
@@ -35,12 +39,16 @@ func (s *Store) scanWorker(row interface{ Scan(dest ...any) error }) (*models.Wo
 	err := row.Scan(&wp.ID, &wp.UserID, &wp.FullName, &wp.Phone, &wp.Gender, &wp.Age,
 		&wp.PriceMin, &wp.PriceMax, &wp.Lat, &wp.Lng, &catIDs,
 		&wp.Online, &wp.Banned, &wp.CreditLimit, &wp.Rating, &wp.RatingsCount, &wp.CreatedAt,
-		&wp.AvatarURL, &wp.About, &wp.ExperienceYears, &wp.Address, &images)
+		&wp.AvatarURL, &wp.About, &wp.ExperienceYears, &wp.Address, &images,
+		&wp.PassportSeries, &wp.FreeOrdersUsed)
 	if err != nil {
 		return nil, err
 	}
 	wp.CategoryIDs = unmarshalStrings(catIDs)
 	wp.Images = unmarshalStrings(images)
+	// The limit is a setting, not a column: raise it and every worker's remaining
+	// trial jobs go up with it, including the ones already signed up.
+	wp.FreeOrdersLimit = s.FreeOrderLimit()
 	return &wp, nil
 }
 
@@ -54,10 +62,16 @@ func (s *Store) scanWorker(row interface{ Scan(dest ...any) error }) (*models.Wo
 // holder picked — but "not set" should mean "use the photo we do have" rather
 // than showing a customer initials while the worker sees their photo on their
 // own profile tab.
+//
+// The trial counter is read the same way — one correlated subquery instead of a
+// second round trip per worker, which matters on the dispatch path where every
+// online worker in the city is scanned for every order.
 const workerCols = `id, user_id, full_name, phone, gender, age, price_min, price_max, lat, lng,
 	category_ids, online, banned, credit_limit, rating, ratings_count, created_at,
 	COALESCE(NULLIF(avatar_url, ''), (SELECT u.avatar_url FROM users u WHERE u.id = workers.user_id), '') AS avatar_url,
-	about, experience_years, address, images`
+	about, experience_years, address, images, passport_series,
+	COALESCE((SELECT ft.used FROM free_trials ft
+		WHERE workers.passport_series <> '' AND ft.key = 'worker:' || workers.passport_series), 0) AS free_orders_used`
 
 // CreateWorkerProfile creates a worker profile and grants the worker role.
 func (s *Store) CreateWorkerProfile(userID string, in WorkerInput) (*models.WorkerProfile, error) {
@@ -73,6 +87,16 @@ func (s *Store) CreateWorkerProfile(userID string, in WorkerInput) (*models.Work
 	}
 	if in.FullName == "" || in.Phone == "" {
 		return nil, ErrBadRequest
+	}
+	// The passport is checked before anything is written. A worker whose series
+	// is missing or malformed would carry no trial ledger key at all, which
+	// silently costs them their three free jobs — better to refuse the form.
+	passport := NormalizePassport(in.PassportSeries)
+	if !ValidPassport(passport) {
+		return nil, ErrInvalidPassport
+	}
+	if s.passportTaken(passport, "") {
+		return nil, ErrDuplicatePassport
 	}
 	for _, c := range in.CategoryIDs {
 		if !s.categoryExists(c) {
@@ -101,17 +125,27 @@ func (s *Store) CreateWorkerProfile(userID string, in WorkerInput) (*models.Work
 		ExperienceYears: in.ExperienceYears,
 		Address:         in.Address,
 		Images:          in.Images,
+		PassportSeries:  passport,
+		FreeOrdersUsed:  s.freeOrdersUsed(WorkerTrialKey(passport)),
+		FreeOrdersLimit: s.FreeOrderLimit(),
 		CreatedAt:       time.Now(),
 	}
 	if wp.Images == nil {
 		wp.Images = []string{}
 	}
-	s.db.Exec(`INSERT INTO workers (id, user_id, full_name, phone, gender, age, price_min, price_max,
-		lat, lng, category_ids, created_at, avatar_url, about, experience_years, address, images)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+	// The insert is checked here, unlike the other writes in this file: the
+	// passport carries a unique index, and two operators filling in the same
+	// worker at the same time both pass the check above. Losing that race has to
+	// be an error the office sees rather than a profile that never appeared.
+	if _, err := s.db.Exec(`INSERT INTO workers (id, user_id, full_name, phone, gender, age, price_min, price_max,
+		lat, lng, category_ids, created_at, avatar_url, about, experience_years, address, images, passport_series)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
 		wp.ID, wp.UserID, wp.FullName, wp.Phone, wp.Gender, wp.Age, wp.PriceMin, wp.PriceMax, wp.Lat, wp.Lng,
 		marshalJSON(wp.CategoryIDs), wp.CreatedAt,
-		wp.AvatarURL, wp.About, wp.ExperienceYears, wp.Address, marshalJSON(wp.Images))
+		wp.AvatarURL, wp.About, wp.ExperienceYears, wp.Address, marshalJSON(wp.Images),
+		wp.PassportSeries); err != nil {
+		return nil, ErrDuplicatePassport
+	}
 	// Grant worker role.
 	_ = u
 	s.addRoleInternal(userID, models.RoleWorker)
@@ -305,6 +339,9 @@ type CompanyInput struct {
 	CategoryIDs []string
 	Lat         float64
 	Lng         float64
+	// INN is required, for the same reason a worker's passport is: it is the firm
+	// on paper, and the key its free trial jobs are counted under.
+	INN string
 
 	AvatarURL       string
 	Address         string
@@ -318,19 +355,36 @@ type CompanyInput struct {
 func (s *Store) scanCompany(row interface{ Scan(dest ...any) error }) (*models.CompanyProfile, error) {
 	var cp models.CompanyProfile
 	var images, categoryIDs string
+	var until sql.NullTime
 	err := row.Scan(&cp.ID, &cp.UserID, &cp.Name, &cp.Phone, &cp.Description, &images,
 		&cp.Online, &cp.Banned, &cp.Rating, &cp.RatingsCount, &cp.CreatedAt, &cp.Price,
 		&cp.AvatarURL, &cp.Address, &cp.WorkingHours, &cp.EmployeesCount, &cp.ExperienceYears,
-		&cp.Email, &cp.Website, &categoryIDs, &cp.Lat, &cp.Lng)
+		&cp.Email, &cp.Website, &categoryIDs, &cp.Lat, &cp.Lng,
+		&cp.INN, &cp.FreeOrdersUsed, &until)
 	if err != nil {
 		return nil, err
 	}
 	cp.Images = unmarshalStrings(images)
 	cp.CategoryIDs = unmarshalStrings(categoryIDs)
+	cp.FreeOrdersLimit = s.FreeOrderLimit()
+	if until.Valid {
+		end := until.Time
+		cp.SubscriptionUntil = &end
+		cp.SubscriptionActive = end.After(time.Now())
+		if cp.SubscriptionActive {
+			// Rounded up, so the last partial day still reads as a day left.
+			cp.SubscriptionDaysLeft = int(time.Until(end).Hours()/24) + 1
+		}
+	}
 	return &cp, nil
 }
 
-const companyCols = "id, user_id, name, phone, description, images, online, banned, rating, ratings_count, created_at, price, avatar_url, address, working_hours, employees_count, experience_years, email, website, category_ids, lat, lng"
+const companyCols = `id, user_id, name, phone, description, images, online, banned, rating,
+	ratings_count, created_at, price, avatar_url, address, working_hours, employees_count,
+	experience_years, email, website, category_ids, lat, lng, inn,
+	COALESCE((SELECT ft.used FROM free_trials ft
+		WHERE companies.inn <> '' AND ft.key = 'company:' || companies.inn), 0) AS free_orders_used,
+	subscription_until`
 
 // CreateCompanyProfile creates a company profile and grants the company role.
 func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.CompanyProfile, error) {
@@ -346,6 +400,13 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 	// A company must publish what it charges — customers order at that price.
 	if in.Name == "" || in.Price <= 0 {
 		return nil, ErrBadRequest
+	}
+	inn := NormalizeINN(in.INN)
+	if !ValidINN(inn) {
+		return nil, ErrInvalidINN
+	}
+	if s.innTaken(inn, "") {
+		return nil, ErrDuplicateINN
 	}
 	// A firm that lists a category nobody has heard of is a firm no search
 	// finds, so a bad id is refused rather than quietly stored.
@@ -373,6 +434,9 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 		ExperienceYears: in.ExperienceYears,
 		Email:           in.Email,
 		Website:         in.Website,
+		INN:             inn,
+		FreeOrdersUsed:  s.freeOrdersUsed(CompanyTrialKey(inn)),
+		FreeOrdersLimit: s.FreeOrderLimit(),
 		CreatedAt:       time.Now(),
 	}
 	if cp.Images == nil {
@@ -381,14 +445,18 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 	if cp.CategoryIDs == nil {
 		cp.CategoryIDs = []string{}
 	}
-	s.db.Exec(`INSERT INTO companies (id, user_id, name, phone, description, images, created_at, price,
+	// Checked for the same reason the worker insert is: the INN is unique, and
+	// two operators typing in the same firm at once both get past the check above.
+	if _, err := s.db.Exec(`INSERT INTO companies (id, user_id, name, phone, description, images, created_at, price,
 		avatar_url, address, working_hours, employees_count, experience_years, email, website,
-		category_ids, lat, lng)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+		category_ids, lat, lng, inn)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
 		cp.ID, cp.UserID, cp.Name, cp.Phone, cp.Description,
 		marshalJSON(cp.Images), cp.CreatedAt, cp.Price,
 		cp.AvatarURL, cp.Address, cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears,
-		cp.Email, cp.Website, marshalJSON(cp.CategoryIDs), cp.Lat, cp.Lng)
+		cp.Email, cp.Website, marshalJSON(cp.CategoryIDs), cp.Lat, cp.Lng, cp.INN); err != nil {
+		return nil, ErrDuplicateINN
+	}
 	s.addRoleInternal(userID, models.RoleCompany)
 	return cp, nil
 }
@@ -401,9 +469,11 @@ type CompanyPatch struct {
 	CategoryIDs *[]string
 	Lat         *float64
 	Lng         *float64
-	// Phone is admin-only: the company's contact number is part of the record
-	// the office fills in, not something the account edits itself.
+	// Phone and INN are admin-only: the company's contact number and its tax
+	// number are part of the record the office fills in, not something the
+	// account edits itself.
 	Phone *string
+	INN   *string
 
 	AvatarURL       *string
 	Address         *string
@@ -589,6 +659,12 @@ func (s *Store) GetCompanyByID(companyID string) (*models.CompanyProfile, bool) 
 	return cp, true
 }
 
+// CompanyByUser is the exported reader for a firm's own profile — the API layer
+// needs it to answer questions about the caller's billing state.
+func (s *Store) CompanyByUser(userID string) (*models.CompanyProfile, bool) {
+	return s.getCompanyByUser(userID)
+}
+
 func (s *Store) getCompanyByUser(userID string) (*models.CompanyProfile, bool) {
 	cp, err := s.scanCompany(s.db.QueryRow("SELECT "+companyCols+" FROM companies WHERE user_id=$1", userID))
 	if err != nil {
@@ -641,11 +717,26 @@ func (s *Store) AdminUpdateCompany(companyID string, p CompanyPatch) (*models.Co
 	if !s.validCategories(p.CategoryIDs) {
 		return nil, ErrBadRequest
 	}
+	if p.INN != nil {
+		inn := NormalizeINN(*p.INN)
+		if !ValidINN(inn) {
+			return nil, ErrInvalidINN
+		}
+		if s.innTaken(inn, cp.UserID) {
+			return nil, ErrDuplicateINN
+		}
+		// Its own statement, like a worker's passport, so the firm's trial counter
+		// follows the corrected number.
+		if _, err := s.db.Exec("UPDATE companies SET inn=$1 WHERE id=$2", inn, cp.ID); err != nil {
+			return nil, ErrDuplicateINN
+		}
+		cp.INN = inn
+	}
 	p.apply(cp)
 	if p.Phone != nil {
 		cp.Phone = normalizePhone(*p.Phone)
 	}
 	s.db.Exec(companyUpdateSQL+", phone=$15 WHERE id=$16",
-		append(companyUpdateArgs(cp), cp.Phone, companyID)...)
+		append(companyUpdateArgs(cp), cp.Phone, cp.ID)...)
 	return cp, nil
 }

@@ -14,35 +14,23 @@ func (s *Store) GetWallet(userID string) (*models.Wallet, bool) {
 	return w, true
 }
 
-// Topup records a payment. When credit is true (dev mode) the amount is applied
-// to the balance immediately and the payment is marked successful.
-func (s *Store) Topup(userID, provider string, amount int64, credit bool) (*models.Payment, *models.Wallet, error) {
+// TopupDev credits a wallet without a gateway, for local development.
+//
+// This is the whole of what the old Topup did in production too: it invented a
+// payment, marked it pending, and handed back a made-up checkout URL. Real
+// money now goes through OpenPayment → the gateway → SettlePayment, so this is
+// explicitly the development path and named as one — a function called `Topup`
+// that quietly credits an account is a thing somebody eventually calls by
+// accident.
+func (s *Store) TopupDev(userID string, amount int64) (*models.Payment, *models.Wallet, error) {
 	if amount <= 0 {
 		return nil, nil, ErrBadRequest
 	}
-	if provider != "click" && provider != "payme" {
-		return nil, nil, ErrBadRequest
-	}
-	w := s.getWallet(userID)
-	if w == nil {
+	if s.getWallet(userID) == nil {
 		return nil, nil, ErrNotFound
 	}
-	status := "pending"
-	if credit {
-		s.db.Exec("UPDATE wallets SET balance = balance + $1 WHERE user_id = $2", amount, userID)
-		w.Balance += amount
-		status = "success"
-	}
-	p := s.CreatePayment(userID, provider, amount)
-	if status == "success" {
-		s.db.Exec("UPDATE payments SET status='success' WHERE id=$1", p.ID)
-		p.Status = "success"
-	} else {
-		// CreatePayment already sets "completed", override to pending.
-		s.db.Exec("UPDATE payments SET status='pending' WHERE id=$1", p.ID)
-		p.Status = "pending"
-	}
-	return p, w, nil
+	p := s.CreatePayment(userID, "dev", amount, models.PurposeWallet)
+	return p, s.CreditWallet(userID, amount), nil
 }
 
 // CommissionPercent exposes the current commission percentage.
@@ -62,6 +50,51 @@ func (s *Store) walletCanAccept(workerUserID string) bool {
 		return false
 	}
 	return w.Balance >= w.MinBalance || w.CreditLimit > 0
+}
+
+// canWorkerAccept is the whole question of whether a worker may take a job:
+// either they still have one of their free trial jobs, or their wallet can carry
+// the commission.
+//
+// It reads the counter off the profile rather than the ledger, because the
+// profile was scanned with it — the dispatch path asks this about every online
+// worker in the city for every order, and a query per worker there is a query
+// per worker per twelve seconds.
+func (s *Store) canWorkerAccept(wp *models.WorkerProfile) bool {
+	if wp == nil {
+		return false
+	}
+	if wp.FreeOrdersLeft() > 0 {
+		return true
+	}
+	return s.walletCanAccept(wp.UserID)
+}
+
+// chargeWorkerAcceptance settles a job the worker has just won and returns the
+// commission actually taken.
+//
+// The free trial is spent before money is: that is what makes it a trial. The
+// consume is atomic, so if it fails — the last free job went to another order a
+// millisecond earlier — this falls through to the wallet rather than handing out
+// a fourth free job.
+func (s *Store) chargeWorkerAcceptance(wp *models.WorkerProfile, commission int64) int64 {
+	if s.consumeFreeOrder(WorkerTrialKey(wp.PassportSeries)) {
+		return 0
+	}
+	s.deductCommission(wp.UserID, commission)
+	return commission
+}
+
+// chargeCompanyAcceptance settles a job a firm has just accepted.
+//
+// A firm holding a subscription pays nothing per job — it has already paid for
+// the month this job arrived in — so nothing is charged and no trial is spent.
+// Only a firm still on its free jobs burns one here.
+func (s *Store) chargeCompanyAcceptance(cp *models.CompanyProfile) {
+	if cp.SubscriptionActive {
+		return
+	}
+	s.consumeFreeOrder(CompanyTrialKey(cp.INN))
 }
 
 // TopupWallet is used by Topup method.

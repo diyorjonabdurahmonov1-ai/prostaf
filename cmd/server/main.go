@@ -40,6 +40,10 @@ func main() {
 	}
 	hub := sse.New()
 	srv := api.NewServer(cfg, st, hub)
+	// Firms pay by the month, so somebody has to notice when a month is nearly
+	// over. Nothing else on the platform is time-driven — every other message is
+	// a reaction to a request — which is why this needs its own loop.
+	go srv.WatchSubscriptions()
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,
