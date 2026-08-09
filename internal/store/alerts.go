@@ -131,8 +131,8 @@ func (s *Store) companyAlert(cp *models.CompanyProfile) (models.Alert, bool) {
 			Role:  models.RoleCompany,
 			Title: "Obuna kerak",
 			Body: fmt.Sprintf(
-				"Bepul %d ta ish qabul qilish imkoniyati tugadi. Buyurtma olish uchun oylik obunani rasmiylashtiring — bir oy %s so'm.",
-				s.FreeOrderLimit(), formatSom(s.CheapestMonthlyPrice())),
+				"Bepul %d ta ish qabul qilish imkoniyati tugadi. Buyurtma olish uchun oylik obunani rasmiylashtiring.",
+				s.FreeOrderLimit()),
 			Action: "subscription",
 		}, true
 	}
