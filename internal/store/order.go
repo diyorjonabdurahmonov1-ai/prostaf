@@ -801,6 +801,29 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 	return r, nil
 }
 
+// CustomerCard is the public half of the account that placed an order: who
+// they are, how many jobs they have put out, and how the providers who did
+// those jobs rated them afterwards.
+//
+// The phone is never included here — the caller adds it back only when the
+// order is already theirs, which keeps one rule in one place.
+func (s *Store) CustomerCard(userID string) (*models.OrderCustomer, bool) {
+	c := &models.OrderCustomer{ID: userID}
+	err := s.db.QueryRow(`
+		SELECT COALESCE(u.name, ''), COALESCE(u.avatar_url, ''), u.created_at,
+		       (SELECT COUNT(*) FROM orders o WHERE o.customer_id = u.id),
+		       (SELECT COALESCE(AVG(r.stars), 0) FROM ratings r
+		          WHERE r.to_user_id = u.id AND r.target_role = $2),
+		       (SELECT COUNT(*) FROM ratings r
+		          WHERE r.to_user_id = u.id AND r.target_role = $2)
+		FROM users u WHERE u.id = $1`, userID, models.RoleCustomer).
+		Scan(&c.Name, &c.AvatarURL, &c.MemberSince, &c.OrdersCount, &c.Rating, &c.RatingsCount)
+	if err != nil {
+		return nil, false
+	}
+	return c, true
+}
+
 // ListReviews returns what has been said about a user *in one role*, newest
 // first. Pass RoleWorker for a worker profile, RoleCompany for a firm.
 //

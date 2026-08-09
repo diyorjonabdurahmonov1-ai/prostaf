@@ -7,6 +7,7 @@ import (
 
 	"prostaff/internal/atmos"
 	"prostaff/internal/config"
+	"prostaff/internal/push"
 	"prostaff/internal/sse"
 	"prostaff/internal/store"
 	"prostaff/internal/ws"
@@ -45,6 +46,9 @@ func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 			RedirectURL:    cfg.AtmosRedirectURL,
 		}),
 	}
+	// A token Expo reports as dead is dropped, so the next order does not queue
+	// a push at a device that has not existed since the app was uninstalled.
+	push.OnInvalidToken = st.ClearPushToken
 	s.handler = recoverMW(logMW(corsMW(cfg.AllowedOrigins)(s.routes())))
 	return s
 }
@@ -121,6 +125,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/orders", s.authed(s.handleCreateOrder))
 	mux.HandleFunc("GET "+p+"/orders", s.authed(s.handleListOrders))
 	mux.HandleFunc("GET "+p+"/orders/{id}", s.authed(s.handleGetOrder))
+	mux.HandleFunc("GET "+p+"/orders/{id}/customer", s.authed(s.handleOrderCustomer))
 	// Broadcast dispatch: an order is offered to every nearby worker on create;
 	// this re-runs the search when nobody took it.
 	mux.HandleFunc("POST "+p+"/orders/{id}/dispatch", s.authed(s.handleRedispatch))

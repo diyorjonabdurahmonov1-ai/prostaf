@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // expoStub stands in for exp.host and records the batch it was given.
@@ -148,5 +149,105 @@ func TestHTTPErrorIsReturnedWithExpoBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "PUSH_TOO_MANY_EXPERIENCE_IDS") {
 		t.Errorf("err = %v, want Expo's reason included", err)
+	}
+}
+
+// expoRouter stands in for exp.host across both endpoints, so a test can watch
+// a send turn into a receipt lookup the way it does in production.
+func expoRouter(t *testing.T, sendReply, receiptsReply string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/send", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, sendReply)
+	})
+	mux.HandleFunc("/getReceipts", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, receiptsReply)
+	})
+	srv := httptest.NewServer(mux)
+
+	originalURL, originalDelay, originalHook := expoURL, receiptDelay, OnInvalidToken
+	expoURL = srv.URL + "/send"
+	receiptDelay = time.Millisecond
+	t.Cleanup(func() {
+		expoURL, receiptDelay, OnInvalidToken = originalURL, originalDelay, originalHook
+		srv.Close()
+	})
+}
+
+// waitForInvalidToken installs the hook and returns a channel carrying whatever
+// token Send decides is dead.
+func waitForInvalidToken() chan string {
+	dead := make(chan string, 4)
+	OnInvalidToken = func(token string) { dead <- token }
+	return dead
+}
+
+// A token Expo refuses outright must not survive in the database — every later
+// order pays a round trip for it and nobody is reachable at the other end.
+func TestSendRetiresATokenExpoRejects(t *testing.T) {
+	expoRouter(t,
+		`{"data":[{"status":"error","message":"...","details":{"error":"DeviceNotRegistered"}}]}`,
+		`{"data":{}}`)
+	dead := waitForInvalidToken()
+
+	Send(Message{To: "ExponentPushToken[gone]", Title: "t"})
+
+	select {
+	case token := <-dead:
+		if token != "ExponentPushToken[gone]" {
+			t.Fatalf("retired %q, want the rejected token", token)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a DeviceNotRegistered ticket left the token in place")
+	}
+}
+
+// The failure that makes push look dead on a release build — Expo accepts the
+// message and FCM refuses it — is only ever visible in the receipt. Send has to
+// go back for it, or the whole thing fails in complete silence.
+func TestSendFollowsAnAcceptedMessageToItsReceipt(t *testing.T) {
+	expoRouter(t,
+		`{"data":[{"status":"ok","id":"R-1"}]}`,
+		`{"data":{"R-1":{"status":"error","message":"...","details":{"error":"DeviceNotRegistered"}}}}`)
+	dead := waitForInvalidToken()
+
+	Send(Message{To: "ExponentPushToken[stale]", Title: "t"})
+
+	select {
+	case token := <-dead:
+		if token != "ExponentPushToken[stale]" {
+			t.Fatalf("retired %q, want the undelivered token", token)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("an accepted-then-undelivered push was never followed up")
+	}
+}
+
+// A credentials problem is the operator's to fix, not the device's: the token
+// is still good and must stay.
+func TestABadFCMKeyDoesNotCostTheUserTheirToken(t *testing.T) {
+	expoRouter(t,
+		`{"data":[{"status":"ok","id":"R-2"}]}`,
+		`{"data":{"R-2":{"status":"error","message":"...","details":{"error":"MismatchSenderId"}}}}`)
+	dead := waitForInvalidToken()
+
+	Send(Message{To: "ExponentPushToken[fine]", Title: "t"})
+
+	select {
+	case token := <-dead:
+		t.Fatalf("retired %q over a server-side FCM misconfiguration", token)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+func TestCodeReadsExposDetails(t *testing.T) {
+	ticket := Ticket{Details: map[string]any{"error": "MessageTooBig"}}
+	if got := ticket.Code(); got != "MessageTooBig" {
+		t.Errorf("Ticket.Code() = %q, want MessageTooBig", got)
+	}
+	if got := (Receipt{}).Code(); got != "" {
+		t.Errorf("Receipt.Code() with no details = %q, want empty", got)
 	}
 }

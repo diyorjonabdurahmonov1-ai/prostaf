@@ -330,6 +330,30 @@ type Review struct {
 	CreatedAt    time.Time `json:"created_at"`
 }
 
+// OrderCustomer is the person who placed a job, as the provider deciding
+// whether to take it is allowed to see them.
+//
+// A worker answering an invite had nothing to answer about the other party: a
+// price, a pin on a map and a sentence of description, with no way to tell a
+// regular from a first-timer, or from someone three previous workers have rated
+// one star. This is that missing half of the decision — and deliberately not
+// the whole account: the phone number stays out until the job is actually
+// theirs, which is the same rule the order itself follows.
+type OrderCustomer struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	AvatarURL string `json:"avatar_url,omitempty"`
+	// Phone is only filled once the provider holds the order. Before that it is
+	// empty, exactly as it is on the masked order.
+	Phone string `json:"phone,omitempty"`
+	// Rating is the average of the stars this account has been given *as a
+	// customer* — not as a worker or a firm it may also be.
+	Rating       float64   `json:"rating"`
+	RatingsCount int       `json:"ratings_count"`
+	OrdersCount  int       `json:"orders_count"`
+	MemberSince  time.Time `json:"member_since"`
+}
+
 // Wallet is a user's balance ledger snapshot.
 type Wallet struct {
 	Balance     int64  `json:"balance"`

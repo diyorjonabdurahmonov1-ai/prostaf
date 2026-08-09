@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"prostaff/internal/push"
 )
@@ -66,6 +67,74 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{"sent": ok, "token": token, "tickets": tickets}
 	if !ok && len(tickets) > 0 {
 		out["reason"] = tickets[0].Message
+		out["code"] = tickets[0].Code()
+		out["hint"] = pushHint(tickets[0].Code())
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+
+	// An accepted ticket is not a delivered notification, and the difference is
+	// the whole of "push works in the app but nothing arrives with it closed".
+	// Everything that silently swallows a release build's notifications — an
+	// FCM V1 service account that was never uploaded to the Expo project, or one
+	// that belongs to a different Firebase project than google-services.json —
+	// shows up only in the receipt, several seconds later. So this waits for it.
+	if len(tickets) > 0 && tickets[0].ID != "" {
+		if receipt, found := awaitReceipt(tickets[0].ID); found {
+			out["receipt"] = receipt
+			out["delivered"] = receipt.Status == "ok"
+			if receipt.Status != "ok" {
+				out["sent"] = false
+				out["reason"] = receipt.Message
+				out["code"] = receipt.Code()
+				out["hint"] = pushHint(receipt.Code())
+			}
+		} else {
+			// Expo has not decided yet. That is not a failure; saying so is
+			// more useful than reporting a success nobody has confirmed.
+			out["receipt_pending"] = true
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// awaitReceipt polls Expo for a verdict. Expo takes a few seconds to hear back
+// from FCM/APNs and answers with an empty map until it has.
+func awaitReceipt(ticketID string) (push.Receipt, bool) {
+	for _, wait := range []time.Duration{3 * time.Second, 3 * time.Second, 4 * time.Second} {
+		time.Sleep(wait)
+		receipts, err := push.GetReceipts([]string{ticketID})
+		if err != nil {
+			return push.Receipt{}, false
+		}
+		if r, ok := receipts[ticketID]; ok {
+			return r, true
+		}
+	}
+	return push.Receipt{}, false
+}
+
+// pushHint turns Expo's error code into the thing that actually has to be
+// changed. These are the only three that matter in practice, and each one has
+// been mistaken for "the phone is broken" at least once.
+func pushHint(code string) string {
+	switch code {
+	case "DeviceNotRegistered":
+		return "Qurilma tokeni eskirgan (ilova o'chirilgan yoki qayta o'rnatilgan). " +
+			"Ilovaga qayta kiring — yangi token ro'yxatdan o'tadi."
+	case "MismatchSenderId":
+		return "Expo loyihasidagi FCM kaliti google-services.json faylidagi Firebase " +
+			"loyihasiga to'g'ri kelmayapti. `eas credentials` orqali FCM V1 service " +
+			"account kalitini qayta yuklang va APK'ni qayta yig'ing."
+	case "InvalidCredentials":
+		return "Expo loyihasiga FCM V1 service account kaliti yuklanmagan. " +
+			"Firebase Console → Project settings → Service accounts → Generate new " +
+			"private key, so'ng `eas credentials` orqali yuklang."
+	case "MessageTooBig":
+		return "Xabar hajmi 4 KB dan oshib ketdi."
+	case "MessageRateExceeded":
+		return "Juda ko'p xabar yuborildi — biroz kutib qayta urinib ko'ring."
+	default:
+		return ""
+	}
 }

@@ -280,6 +280,19 @@ func (s *Store) SetPushToken(userID, token string) error {
 	return nil
 }
 
+// ClearPushToken forgets a token Expo has told us is dead, whoever holds it.
+//
+// Keyed by the token and not by the user on purpose: the report comes back from
+// Expo asynchronously, long after the request that sent the push, and the token
+// is the only thing that identifies the device. Reinstalling the app issues a
+// new token and leaves the old row pointing at nothing.
+func (s *Store) ClearPushToken(token string) {
+	if token == "" {
+		return
+	}
+	s.db.Exec("UPDATE users SET push_token='' WHERE push_token=$1", token)
+}
+
 func (s *Store) GetPushToken(userID string) string {
 	var token string
 	s.db.QueryRow("SELECT push_token FROM users WHERE id=$1", userID).Scan(&token)

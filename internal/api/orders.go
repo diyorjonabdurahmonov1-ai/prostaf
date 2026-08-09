@@ -77,10 +77,39 @@ func (s *Server) handleListOrders(w http.ResponseWriter, r *http.Request) {
 // GET /orders/{id}
 func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
+	order, party, ok := s.orderFor(w, r)
+	if !ok {
+		return // orderFor has already written the 404 or 403
+	}
+	if party == partyParticipant {
+		writeJSON(w, http.StatusOK, order)
+		return
+	}
+	writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
+}
+
+// How the caller is related to an order they are allowed to read.
+const (
+	// partyParticipant sees everything: the customer, the worker or firm who
+	// holds it, or an admin.
+	partyParticipant = iota
+	// partyInvited is a worker the order has merely been offered to. They get a
+	// masked copy — no customer phone until they actually take the job.
+	partyInvited
+)
+
+// orderFor resolves the order named in the request and the caller's standing in
+// it, writing the 404 or 403 itself when there is nothing to serve.
+//
+// Extracted because this rule now has two readers — the order and the customer
+// card behind it — and the one thing worse than a duplicated authorisation
+// check is two of them that drift apart.
+func (s *Server) orderFor(w http.ResponseWriter, r *http.Request) (*models.Order, int, bool) {
+	u := userFrom(r)
 	order, ok := s.store.GetOrder(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "order not found")
-		return
+		return nil, 0, false
 	}
 	// Check if the user owns the company this order is directed to.
 	isCompanyOwner := false
@@ -89,17 +118,43 @@ func (s *Server) handleGetOrder(w http.ResponseWriter, r *http.Request) {
 			isCompanyOwner = true
 		}
 	}
-	switch {
-	case order.CustomerID == u.ID || order.WorkerID == u.ID || isCompanyOwner || u.HasRole(models.RoleAdmin):
-		writeJSON(w, http.StatusOK, order)
-	default:
-		// Invited worker may view a masked copy.
-		if wp, ok := s.store.GetWorkerByUser(u.ID); ok && contains(order.InvitedWorkerIDs, wp.ID) {
-			writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
-			return
-		}
-		writeError(w, http.StatusForbidden, "forbidden", "not your order")
+	if order.CustomerID == u.ID || order.WorkerID == u.ID || isCompanyOwner || u.HasRole(models.RoleAdmin) {
+		return order, partyParticipant, true
 	}
+	// Invited worker may view a masked copy.
+	if wp, ok := s.store.GetWorkerByUser(u.ID); ok && contains(order.InvitedWorkerIDs, wp.ID) {
+		return order, partyInvited, true
+	}
+	writeError(w, http.StatusForbidden, "forbidden", "not your order")
+	return nil, 0, false
+}
+
+// GET /orders/{id}/customer — who placed this job.
+//
+// Answering an invite used to be a decision made about a price and a map pin.
+// This is the other half: the name, the face, how many jobs the account has put
+// out and what previous workers thought of it. Same permissions as the order
+// itself, and the phone follows the same rule — withheld until the job is
+// actually the caller's.
+func (s *Server) handleOrderCustomer(w http.ResponseWriter, r *http.Request) {
+	order, party, ok := s.orderFor(w, r)
+	if !ok {
+		return
+	}
+	card, found := s.store.CustomerCard(order.CustomerID)
+	if !found {
+		writeError(w, http.StatusNotFound, "not_found", "customer not found")
+		return
+	}
+	// The name typed onto the order wins over the account's own: a firm order
+	// carries the name given at the time, which is who the firm is expecting.
+	if order.CustomerName != "" {
+		card.Name = order.CustomerName
+	}
+	if party == partyParticipant {
+		card.Phone = order.CustomerPhone
+	}
+	writeJSON(w, http.StatusOK, card)
 }
 
 // POST /orders/{id}/dispatch — search again for an order nobody took.

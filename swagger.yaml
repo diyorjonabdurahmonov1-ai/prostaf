@@ -913,6 +913,28 @@ paths:
               schema:
                 $ref: "#/components/schemas/Order"
 
+  /orders/{id}/customer:
+    get:
+      tags: [Orders]
+      summary: Who placed this order
+      description: >
+        The public card of the account behind the order — name, avatar, how many
+        jobs it has posted and its rating as a customer. Readable by anyone who
+        may read the order itself, including a worker the order has merely been
+        offered to. The phone is included only once the caller holds the order,
+        the same rule the order itself follows.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Customer card
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderCustomer"
+        "403":
+          description: Not your order
+
   /orders/{id}/matches:
     get:
       tags: [Orders]
@@ -2322,6 +2344,33 @@ components:
           type: string
           format: date-time
         created_at:
+          type: string
+          format: date-time
+
+    OrderCustomer:
+      type: object
+      description: >
+        The person who placed a job, as the provider deciding whether to take it
+        is allowed to see them.
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        avatar_url:
+          type: string
+        phone:
+          type: string
+          description: Present only once the caller holds the order.
+        rating:
+          type: number
+          format: double
+          description: Average stars earned *as a customer*, not as a worker or firm.
+        ratings_count:
+          type: integer
+        orders_count:
+          type: integer
+        member_since:
           type: string
           format: date-time
 
