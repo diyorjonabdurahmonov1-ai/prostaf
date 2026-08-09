@@ -116,7 +116,24 @@ type WorkerProfile struct {
 }
 
 // FreeOrdersLeft is how many trial jobs the worker still has.
+//
+// None at all without a passport series, and that is not a detail — it is the
+// same rule the ledger already enforced, finally stated in the one place that
+// decides anything.
+//
+// The trial is counted against the document, not the profile, so that deleting
+// a worker and opening them again does not hand out three more jobs. A profile
+// with no passport therefore has no ledger row and can never have one: its
+// `used` count reads 0 for ever. This method used to subtract that permanent 0
+// from the limit and answer "three left" every single time, which is how a
+// legacy worker ended up with an unlimited trial — the acceptance gate saw a
+// free job available and never once looked at the wallet, so the balance ran as
+// far negative as the worker cared to take it, while the counter on their panel
+// sat at three of three because nothing was ever written down.
 func (wp *WorkerProfile) FreeOrdersLeft() int {
+	if wp.PassportSeries == "" {
+		return 0
+	}
 	if n := wp.FreeOrdersLimit - wp.FreeOrdersUsed; n > 0 {
 		return n
 	}
@@ -186,8 +203,12 @@ type CompanyProfile struct {
 	CreatedAt            time.Time `json:"created_at"`
 }
 
-// FreeOrdersLeft is how many trial jobs the firm still has.
+// FreeOrdersLeft is how many trial jobs the firm still has. Nothing without an
+// INN, for the reason spelled out on the worker's copy of this.
 func (cp *CompanyProfile) FreeOrdersLeft() int {
+	if cp.INN == "" {
+		return 0
+	}
 	if n := cp.FreeOrdersLimit - cp.FreeOrdersUsed; n > 0 {
 		return n
 	}

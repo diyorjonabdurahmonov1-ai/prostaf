@@ -80,8 +80,12 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 // agreeing to one number and being charged another.
 func (s *Server) handleSubscriptionPlans(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"plans":            s.store.ListSubscriptionPlans(true),
-		"payments_enabled": s.atmos.Enabled(),
+		"plans": s.store.ListSubscriptionPlans(true),
+		// "Can a firm buy a month right now", not "is Atmos configured". Those
+		// were the same question until the development path below existed; with
+		// no gateway and DEV_MODE on, a plan is bought instantly and the flag
+		// saying otherwise would grey out a button that works.
+		"payments_enabled": s.atmos.Enabled() || s.cfg.DevMode,
 	})
 }
 
@@ -118,9 +122,14 @@ func (s *Server) handleCompanySubscriptionCheckout(w http.ResponseWriter, r *htt
 			"Obuna narxi belgilanmagan. Operatorga murojaat qiling.")
 		return
 	}
+	// No gateway yet: sell the months the way a top-up credits a wallet.
+	//
+	// This used to be a flat 503, which made a subscription the one thing in the
+	// app that could not be exercised at all before Atmos was wired up — a firm
+	// out of free jobs was simply stuck, on every environment. A top-up has
+	// always had this path; there was no reason the other purchase did not.
 	if !s.atmos.Enabled() {
-		writeError(w, http.StatusServiceUnavailable, "payments_unavailable",
-			"To'lov tizimi hozircha ishlamayapti. Operatorga murojaat qiling.")
+		s.devSubscribe(w, u.ID, plan)
 		return
 	}
 
@@ -210,6 +219,50 @@ func (s *Server) devTopup(w http.ResponseWriter, userID string, amount int64) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "payment": payment, "wallet": wallet})
+}
+
+// devSubscribe sells a firm its months with no gateway in the loop — devTopup
+// for the other kind of purchase.
+//
+// It deliberately goes the long way round: open a pending payment, settle it,
+// then hand it to `applyPayment`. That is the identical sequence a real Atmos
+// callback runs, so the months, the finance totals, the `subscription.changed`
+// event and the "To'lov qabul qilindi" notification all come out of one code
+// path. Crediting the firm inline instead would work today and quietly drift
+// from the real thing the moment either side is touched.
+func (s *Server) devSubscribe(w http.ResponseWriter, userID string, plan *models.SubscriptionPlan) {
+	if !s.cfg.DevMode {
+		writeError(w, http.StatusServiceUnavailable, "payments_unavailable",
+			"To'lov tizimi sozlanmagan. Operatorga murojaat qiling.")
+		return
+	}
+	payment, err := s.store.OpenPayment(store.PaymentRequest{
+		UserID:   userID,
+		Provider: "dev",
+		Amount:   plan.Price,
+		Purpose:  models.PurposeSubscription,
+		Months:   plan.Months,
+	})
+	if err != nil {
+		writePaymentError(w, err)
+		return
+	}
+	paid, ok := s.store.SettlePaymentByID(payment.ID)
+	if !ok {
+		writeError(w, http.StatusConflict, "payment_failed",
+			"To'lovni yakunlab bo'lmadi. Qayta urinib ko'ring.")
+		return
+	}
+	s.applyPayment(paid)
+
+	// Re-read: applyPayment is what moved the date, and the firm's screen redraws
+	// from whatever comes back here.
+	cp, _ := s.store.CompanyByUser(userID)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"payment": paid,
+		"company": cp,
+	})
 }
 
 // GET /payments/{id} — "did my money land?"

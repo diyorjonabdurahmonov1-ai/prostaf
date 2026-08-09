@@ -149,6 +149,13 @@ func (s *Server) handleCompanyOrders(w http.ResponseWriter, r *http.Request) {
 	if orders == nil {
 		orders = []models.Order{}
 	}
+	// The number belongs to the firm only once it has taken the job — the same
+	// rule a worker has always been held to. Masked here rather than on the
+	// screen: a list endpoint that hands out phone numbers is one `curl` away
+	// from being a directory of everyone who ever ordered.
+	for i := range orders {
+		orders[i] = maskForCompany(orders[i])
+	}
 	writeJSON(w, http.StatusOK, orders)
 }
 
@@ -184,7 +191,11 @@ func (s *Server) handleCompanyOrder(w http.ResponseWriter, r *http.Request) {
 	// Notify the company owner in realtime, and leave the message behind so a
 	// firm that missed the banner still finds the job in their notifications.
 	if company, ok := s.store.GetCompanyByID(companyID); ok {
-		s.publish(company.UserID, sse.Event{Type: "order.status", Data: map[string]any{"order": order}})
+		// Masked: this is the firm's first sight of the job and it has agreed to
+		// nothing yet. An unmasked socket frame would put the number on the card
+		// no matter what the REST endpoints withhold.
+		offered := maskForCompany(*order)
+		s.publish(company.UserID, sse.Event{Type: "order.status", Data: map[string]any{"order": offered}})
 		s.notify(company.UserID, "order.new", "Yangi buyurtma!", order.Description,
 			map[string]any{"order_id": order.ID})
 	}
@@ -228,5 +239,7 @@ func (s *Server) companyRespond(w http.ResponseWriter, r *http.Request, accept b
 			s.notifyTrialSpent(u.ID, cp.FreeOrdersLeft(), models.RoleCompany)
 		}
 	}
-	writeJSON(w, http.StatusOK, order)
+	// Accepting reveals the number; declining leaves it hidden, which is the
+	// point of hiding it in the first place.
+	writeJSON(w, http.StatusOK, maskForCompany(*order))
 }

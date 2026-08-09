@@ -118,8 +118,18 @@ func (s *Server) orderFor(w http.ResponseWriter, r *http.Request) (*models.Order
 			isCompanyOwner = true
 		}
 	}
-	if order.CustomerID == u.ID || order.WorkerID == u.ID || isCompanyOwner || u.HasRole(models.RoleAdmin) {
+	if order.CustomerID == u.ID || order.WorkerID == u.ID || u.HasRole(models.RoleAdmin) {
 		return order, partyParticipant, true
+	}
+	// A firm owns the row from the moment the customer chose it, which is not
+	// the same as holding the job — until it accepts, it reads the order on the
+	// same terms as an invited worker.
+	if isCompanyOwner {
+		masked := maskForCompany(*order)
+		if masked.CustomerPhone != "" {
+			return order, partyParticipant, true
+		}
+		return &masked, partyInvited, true
 	}
 	// Invited worker may view a masked copy.
 	if wp, ok := s.store.GetWorkerByUser(u.ID); ok && contains(order.InvitedWorkerIDs, wp.ID) {

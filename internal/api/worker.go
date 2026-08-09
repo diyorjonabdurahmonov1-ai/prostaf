@@ -222,3 +222,23 @@ func maskForWorker(o models.Order, workerUserID string) models.Order {
 	}
 	return o
 }
+
+// maskForCompany applies that same contract to a firm.
+//
+// It did not, and the difference was not a decision anybody made — it fell out
+// of a firm owning the order row from the moment the customer picked the firm,
+// while a worker is only ever *invited* to one. So the phone was on the card
+// before the firm had agreed to anything: a firm could read every number that
+// came in and call them all back directly, declining each job in the app. The
+// worker side has never allowed that.
+//
+// Holding the job is the line, and status is what says so — a company order
+// carries its company_id from creation, so that cannot be the test.
+func maskForCompany(o models.Order) models.Order {
+	switch o.Status {
+	case models.StatusAccepted, models.StatusInProgress, models.StatusCompleted:
+		return o
+	}
+	o.CustomerPhone = ""
+	return o
+}

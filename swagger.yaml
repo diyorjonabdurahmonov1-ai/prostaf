@@ -1794,6 +1794,12 @@ paths:
         `months` is the compatibility path for an app built before tariffs
         existed: it is matched against an active plan of exactly that length, and
         never priced arithmetically.
+
+        With no gateway configured and `DEV_MODE` on, the months are granted
+        immediately and the reply carries no `payment_url` — the same shape and
+        the same rule a wallet top-up follows. The app treats a missing URL as
+        "already done". With `DEV_MODE` off and no gateway it is a 503 rather
+        than a subscription nobody paid for.
       requestBody:
         required: true
         content:

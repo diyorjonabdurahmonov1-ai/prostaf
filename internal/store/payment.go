@@ -160,6 +160,27 @@ func (s *Store) SettlePayment(externalID string) (*models.Payment, bool) {
 	return p, true
 }
 
+// SettlePaymentByID is SettlePayment for a payment that never went to a
+// gateway, and so has no transaction id to be found under.
+//
+// That is the development path: with no merchant account configured the server
+// still has to be able to sell a month, or a firm's subscription cannot be
+// tested at all. Same single-statement guard, for the same reason — settling
+// twice would apply the months twice.
+func (s *Store) SettlePaymentByID(paymentID string) (*models.Payment, bool) {
+	if paymentID == "" {
+		return nil, false
+	}
+	p, err := scanPayment(s.db.QueryRow(`UPDATE payments
+		SET status=$1, paid_at=NOW()
+		WHERE id=$2 AND status=$3
+		RETURNING `+paymentCols, models.PaymentSuccess, paymentID, models.PaymentPending))
+	if err != nil {
+		return nil, false
+	}
+	return p, true
+}
+
 // CancelPayment marks a payment as not going to happen. Only ever moves a
 // pending row, so a cancellation that arrives after the money did is ignored.
 func (s *Store) CancelPayment(externalID string) {
