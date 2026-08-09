@@ -280,6 +280,43 @@ func (s *Store) SetPushToken(userID, token string) error {
 	return nil
 }
 
+// SetDeviceToken stores the device's own FCM registration token — the one that
+// lets the server send a notification Android renders without waking the app.
+//
+// Cleared from any other account first: a phone that gets handed over, or an
+// account switched on a shared device, leaves the token pointing at whoever
+// signed in last. Without this, the previous owner keeps getting the new one's
+// jobs, on a device that is no longer theirs.
+func (s *Store) SetDeviceToken(userID, token string) error {
+	if token == "" {
+		return nil
+	}
+	s.db.Exec("UPDATE users SET fcm_token='' WHERE fcm_token=$1 AND id<>$2", token, userID)
+	res, err := s.db.Exec("UPDATE users SET fcm_token=$1 WHERE id=$2", token, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetDeviceToken returns the user's FCM registration token, or "".
+func (s *Store) GetDeviceToken(userID string) string {
+	var token string
+	s.db.QueryRow("SELECT fcm_token FROM users WHERE id=$1", userID).Scan(&token)
+	return token
+}
+
+// ClearDeviceToken forgets an FCM token Firebase has reported as unregistered.
+func (s *Store) ClearDeviceToken(token string) {
+	if token == "" {
+		return
+	}
+	s.db.Exec("UPDATE users SET fcm_token='' WHERE fcm_token=$1", token)
+}
+
 // ClearPushToken forgets a token Expo has told us is dead, whoever holds it.
 //
 // Keyed by the token and not by the user on purpose: the report comes back from

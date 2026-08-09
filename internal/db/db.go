@@ -155,6 +155,17 @@ func migrate(db *sql.DB) {
 		// Password column for phone+password auth (added after initial schema).
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT ''`,
 
+		// The device's own FCM registration token, next to the Expo one.
+		//
+		// They are not interchangeable. `push_token` routes through Expo's push
+		// service, which hands Android a data-only message that only becomes a
+		// notification once the app's process picks it up — so it shows nothing
+		// at all with the app closed. `fcm_token` is the raw device token, which
+		// lets the server send a real notification payload that Android renders
+		// on its own. Both are kept: iOS and any build without a Firebase
+		// service account still go out through Expo.
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS fcm_token TEXT NOT NULL DEFAULT ''`,
+
 		// Customer name carried on the order so a company sees who is calling
 		// without a second lookup (added after initial schema).
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS customer_name TEXT NOT NULL DEFAULT ''`,

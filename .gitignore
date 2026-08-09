@@ -15,3 +15,7 @@ tmp/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Firebase service account key — a credential, same class as .env
+secrets/
+*service-account*.json

@@ -3,10 +3,13 @@
 package api
 
 import (
+	"errors"
+	"log"
 	"net/http"
 
 	"prostaff/internal/atmos"
 	"prostaff/internal/config"
+	"prostaff/internal/fcm"
 	"prostaff/internal/push"
 	"prostaff/internal/sse"
 	"prostaff/internal/store"
@@ -24,7 +27,11 @@ type Server struct {
 	// atmos is the payment gateway. Never nil — an unconfigured client reports
 	// itself disabled, which is what keeps development working without a
 	// merchant account.
-	atmos   *atmos.Client
+	atmos *atmos.Client
+	// fcm sends push straight to Firebase, which is the only way a notification
+	// reaches an Android phone whose app process is gone. Nil when no service
+	// account is configured — everything then falls back to Expo, as before.
+	fcm     *fcm.Client
 	handler http.Handler
 }
 
@@ -49,6 +56,21 @@ func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 	// A token Expo reports as dead is dropped, so the next order does not queue
 	// a push at a device that has not existed since the app was uninstalled.
 	push.OnInvalidToken = st.ClearPushToken
+
+	// Firebase, when a service account is configured. Without it the server
+	// still works exactly as it did — it just cannot reach a phone whose app is
+	// closed, because that is a limitation of Expo's data-only delivery and not
+	// something the app can fix. Logged either way: "notifications only arrive
+	// while the app is open" is otherwise a mystery from both ends.
+	if client, err := fcm.New(cfg.FCMServiceAccountFile, cfg.FCMServiceAccountJSON); err == nil {
+		s.fcm = client
+		log.Printf("push: firebase enabled for project %s", client.ProjectID())
+	} else if !errors.Is(err, fcm.ErrNotConfigured) {
+		log.Printf("push: firebase disabled: %v", err)
+	} else {
+		log.Print("push: firebase not configured — falling back to Expo, " +
+			"which cannot deliver to a closed Android app")
+	}
 	s.handler = recoverMW(logMW(corsMW(cfg.AllowedOrigins)(s.routes())))
 	return s
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"prostaff/internal/fcm"
 	"prostaff/internal/push"
 )
 
@@ -32,6 +33,37 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Body == "" {
 		body.Body = "Push ishlayapti — bu xabar serverdan keldi."
+	}
+
+	// Firebase, when that is the path a real order would take. It is a single
+	// synchronous call with a real answer, and no ticket/receipt dance: FCM
+	// either accepted the message for that device or said why not.
+	if s.fcm != nil {
+		if device := s.store.GetDeviceToken(u.ID); device != "" {
+			err := s.fcm.Send(fcm.Message{
+				Token:     device,
+				Title:     body.Title,
+				Body:      body.Body,
+				Data:      map[string]any{"type": "test.push"},
+				ChannelID: "orders",
+				TTL:       60 * time.Second,
+			})
+			out := map[string]any{"transport": "fcm", "token": device}
+			switch {
+			case err == nil:
+				out["sent"], out["delivered"] = true, true
+			case errors.Is(err, fcm.ErrUnregistered):
+				s.store.ClearDeviceToken(device)
+				out["sent"], out["code"] = false, "UNREGISTERED"
+				out["hint"] = pushHint("DeviceNotRegistered")
+			default:
+				out["sent"], out["error"] = false, err.Error()
+				out["hint"] = "Firebase xabarni qabul qilmadi. Server logidagi xatoni " +
+					"tekshiring — odatda service account boshqa Firebase loyihasiga tegishli."
+			}
+			writeJSON(w, http.StatusOK, out)
+			return
+		}
 	}
 
 	token := s.store.GetPushToken(u.ID)

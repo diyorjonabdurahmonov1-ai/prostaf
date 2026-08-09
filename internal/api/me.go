@@ -20,23 +20,58 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /me/push-token
+//
+// Two tokens, because they are two different delivery paths and only one of
+// them reaches a closed Android app. `token` is the Expo push token, which
+// routes through Expo's service and arrives as a data-only FCM message that
+// nothing renders unless the app's process is alive. `device_token` is the
+// phone's own FCM registration token, which lets the server send a real
+// notification payload that Android draws by itself.
+//
+// Either may be absent: iOS and older builds send only the Expo one, and a
+// device that has Firebase but could not reach Expo sends only the other.
 func (s *Server) handleSetPushToken(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
 	var body struct {
-		Token string `json:"token"`
+		Token       string `json:"token"`
+		DeviceToken string `json:"device_token"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.Token == "" {
-		writeError(w, http.StatusBadRequest, "bad_request", "token is required")
+	if body.Token == "" && body.DeviceToken == "" {
+		writeError(w, http.StatusBadRequest, "bad_request", "token or device_token is required")
 		return
 	}
-	if err := s.store.SetPushToken(u.ID, body.Token); err != nil {
-		writeStoreError(w, err)
-		return
+	if body.Token != "" {
+		if err := s.store.SetPushToken(u.ID, body.Token); err != nil {
+			writeStoreError(w, err)
+			return
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	if body.DeviceToken != "" {
+		if err := s.store.SetDeviceToken(u.ID, body.DeviceToken); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true,
+		// So the diagnostics screen can say which transport this device will
+		// actually be reached on, rather than assuming.
+		"transport": s.transportFor(u.ID),
+	})
+}
+
+// transportFor names the path a push to this user would take right now.
+func (s *Server) transportFor(userID string) string {
+	if s.fcm != nil && s.store.GetDeviceToken(userID) != "" {
+		return "fcm"
+	}
+	if s.store.GetPushToken(userID) != "" {
+		return "expo"
+	}
+	return "none"
 }
 
 // POST /me/avatar

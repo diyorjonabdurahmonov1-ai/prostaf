@@ -1,6 +1,11 @@
 package api
 
 import (
+	"errors"
+	"log"
+	"time"
+
+	"prostaff/internal/fcm"
 	"prostaff/internal/models"
 	"prostaff/internal/push"
 	"prostaff/internal/sse"
@@ -50,8 +55,53 @@ func (s *Server) notify(userID, kind, title, body string, data map[string]any) *
 	if n == nil {
 		return nil
 	}
-	if tok := s.store.GetPushToken(userID); tok != "" {
-		push.Send(push.Urgent(tok, title, body, n.Data, 0))
-	}
+	payload, _ := n.Data.(map[string]any)
+	s.ring(userID, title, body, payload, 0)
 	return n
+}
+
+// ring sends the push itself, choosing the transport that can actually reach a
+// closed app.
+//
+// Firebase first, when a service account is configured and the device has
+// handed us its own registration token. That path sends a `notification`
+// payload, which Android draws with the app entirely uninvolved — the whole
+// reason this exists. Expo is the fallback: it is all iOS has here, and all any
+// build predating the device-token upload has, and it works fine right up until
+// the app's process goes away.
+//
+// Best-effort and asynchronous, like the Expo path always was: a push must
+// never hold up an HTTP handler, and a failure must never break the flow that
+// caused it.
+func (s *Server) ring(userID, title, body string, data map[string]any, ttl time.Duration) {
+	if s.fcm != nil {
+		if token := s.store.GetDeviceToken(userID); token != "" {
+			go s.sendFCM(token, title, body, data, ttl)
+			return
+		}
+	}
+	if token := s.store.GetPushToken(userID); token != "" {
+		push.Send(push.Urgent(token, title, body, data, int(ttl.Seconds())))
+	}
+}
+
+// sendFCM delivers one Firebase message and retires a token Firebase says is
+// gone. Falling back to Expo on any other error would double-send to a device
+// that is simply unreachable this second, so it does not.
+func (s *Server) sendFCM(token, title, body string, data map[string]any, ttl time.Duration) {
+	err := s.fcm.Send(fcm.Message{
+		Token:     token,
+		Title:     title,
+		Body:      body,
+		Data:      data,
+		ChannelID: "orders",
+		TTL:       ttl,
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, fcm.ErrUnregistered):
+		s.store.ClearDeviceToken(token)
+	default:
+		log.Printf("push: %v", err)
+	}
 }

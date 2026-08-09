@@ -66,6 +66,17 @@ type Config struct {
 	// AtmosRedirectURL is the deep link Atmos returns the payer's browser to.
 	AtmosRedirectURL string
 
+	// Firebase Cloud Messaging, for push that survives the app being closed.
+	//
+	// With neither of these set the server keeps sending through Expo exactly as
+	// before — which works while the app is running and shows nothing once it is
+	// not, because Expo hands Android a data-only message. Supply the Firebase
+	// service account key (Console → Project settings → Service accounts →
+	// Generate new private key) either as a path or as the JSON itself, and the
+	// server sends a real notification payload that Android renders on its own.
+	FCMServiceAccountFile string
+	FCMServiceAccountJSON string
+
 	// Eskiz SMS provider.
 	EskizBaseURL  string
 	EskizToken    string
@@ -125,6 +136,9 @@ func Load() Config {
 		AtmosTerminalID:     env("ATMOS_TERMINAL_ID", ""),
 		AtmosAPIKey:         env("ATMOS_API_KEY", ""),
 		AtmosRedirectURL:    env("ATMOS_REDIRECT_URL", ""),
+
+		FCMServiceAccountFile: env("FCM_SERVICE_ACCOUNT_FILE", ""),
+		FCMServiceAccountJSON: env("FCM_SERVICE_ACCOUNT_JSON", ""),
 
 		EskizBaseURL:  env("ESKIZ_BASE_URL", ""),
 		EskizToken:    env("ESKIZ_TOKEN", ""),

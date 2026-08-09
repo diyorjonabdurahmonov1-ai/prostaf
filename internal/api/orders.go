@@ -253,21 +253,35 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 		Data: map[string]any{"order": masked, "expires_at": order.InviteExpiresAt},
 	})
 
+	data := map[string]any{"type": "order.invite", "order_id": order.ID}
+
 	var pushMessages []push.Message
 	for _, wuid := range workerUserIDs {
-		// Stored, not notified: the push for this wave goes out below in one
-		// batched call, and going through notify() would ring every worker
-		// twice for the same job.
+		// Stored, not notified: the push for this wave goes out below, and
+		// going through notify() would ring every worker twice for one job.
 		s.record(wuid, "order.invite", "Yangi buyurtma!", order.Description,
 			map[string]any{"order_id": order.ID})
-		// High priority + time-sensitive so it rings through Focus modes; the
-		// TTL matches the search window — a late invite is just noise.
+
+		// Firebase first — it is the only transport that reaches a phone whose
+		// app is closed, which is most phones most of the time and precisely
+		// the ones this wave exists to wake. Expo is the fallback, batched into
+		// one call below: ringing a hundred workers is a hundred writes, not a
+		// hundred round trips.
+		//
+		// The TTL matches the search window either way: an invite that arrives
+		// after its two minutes are up is noise the worker cannot act on.
+		if s.fcm != nil {
+			if tok := s.store.GetDeviceToken(wuid); tok != "" {
+				go s.sendFCM(tok, "Yangi buyurtma!", order.Description, data, store.InviteTTL)
+				continue
+			}
+		}
 		if tok := s.store.GetPushToken(wuid); tok != "" {
 			pushMessages = append(pushMessages, push.Urgent(
 				tok,
 				"Yangi buyurtma!",
 				order.Description,
-				map[string]any{"type": "order.invite", "order_id": order.ID},
+				data,
 				int(store.InviteTTL.Seconds()),
 			))
 		}
