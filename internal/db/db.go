@@ -421,6 +421,19 @@ func migrate(db *sql.DB) {
 		`UPDATE orders SET images = json_build_array(image_url)::text
 		 WHERE images = '[]' AND image_url <> ''`,
 
+		// The workers a customer picked by hand.
+		//
+		// The platform's default is a broadcast: the customer describes the job
+		// and every matching worker nearby is rung at once. That is the right
+		// default and a poor fit for the other thing people want, which is to
+		// look through who is around and call three of them in particular — a
+		// neighbour they have used before, the two with the best reviews.
+		//
+		// Empty means the broadcast, so every order written before this behaves
+		// exactly as it did. Non-empty narrows the search to these worker
+		// profiles and to nobody else, however many other workers would match.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS target_worker_ids TEXT NOT NULL DEFAULT '[]'`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

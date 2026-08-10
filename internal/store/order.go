@@ -33,6 +33,9 @@ type OrderInput struct {
 	Price    int64
 	Lat      float64
 	Lng      float64
+	// TargetWorkerIDs narrows the search to workers the customer picked by hand.
+	// Empty is the ordinary broadcast — see models.Order.
+	TargetWorkerIDs []string
 }
 
 // A worker or company is "busy" while one of their orders is accepted or
@@ -94,18 +97,19 @@ func (s *Store) CompanyIsBusy(companyID string) bool {
 
 func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Order, error) {
 	var o models.Order
-	var invitedIDs, rejectedIDs, images string
+	var invitedIDs, rejectedIDs, images, targetIDs string
 	var inviteExpires sql.NullTime
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
-		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images)
+		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs)
 	if err != nil {
 		return nil, err
 	}
 	o.InvitedWorkerIDs = unmarshalStrings(invitedIDs)
 	o.RejectedWorkerIDs = unmarshalStrings(rejectedIDs)
 	o.Images = unmarshalStrings(images)
+	o.TargetWorkerIDs = unmarshalStrings(targetIDs)
 	// An order written before photos were a list still has its one in the old
 	// column; the reader is where that difference stops mattering.
 	if len(o.Images) == 0 && o.ImageURL != "" {
@@ -117,7 +121,7 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	return &o, nil
 }
 
-const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images"
+const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -140,8 +144,21 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 	if u, ok := s.GetUser(customerID); ok {
 		customerName = u.Name
 	}
-	// The order starts searching the moment it is created — nobody picks a
-	// worker, the order goes out to every worker nearby (see DispatchWave).
+	// Who the order is allowed to reach.
+	//
+	// Names that are not worker profiles are dropped rather than refused: the
+	// list comes from a screen the customer was looking at moments ago, and one
+	// entry going stale — a profile the office removed in between — is no reason
+	// to throw away an order they have finished writing. A list that turns out
+	// to be entirely stale falls through to the broadcast, which is the same
+	// thing the app would have done had they never picked anybody.
+	targets := s.existingWorkerIDs(in.TargetWorkerIDs)
+	if len(targets) > maxTargetWorkers {
+		targets = targets[:maxTargetWorkers]
+	}
+
+	// The order starts searching the moment it is created — with no targets it
+	// goes out to every matching worker nearby (see DispatchWave).
 	expires := time.Now().Add(InviteTTL)
 	o := &models.Order{
 		ID:                id.New(),
@@ -159,14 +176,15 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		Status:            models.StatusMatching,
 		InvitedWorkerIDs:  []string{},
 		RejectedWorkerIDs: []string{},
+		TargetWorkerIDs:   targets,
 		InviteExpiresAt:   &expires,
 		CreatedAt:         time.Now(),
 	}
 	normalizeOrderPhotos(o)
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
 		o.ID, o.CustomerID, "", "", o.CategoryID, o.Gender, o.Description, o.ImageURL,
 		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
-		marshalJSON(o.Images)); err != nil {
+		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs)); err != nil {
 		log.Printf("store: order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -421,10 +439,67 @@ func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.
 	return out
 }
 
+// maxTargetWorkers caps a hand-picked list. Past this the customer is not
+// choosing anybody, they are broadcasting the long way round — and the whole
+// point of naming workers is that the phones which ring are ones they meant.
+const maxTargetWorkers = 10
+
+// existingWorkerIDs keeps the ids that are real worker profiles, in the order
+// they were given and without repeats.
+func (s *Store) existingWorkerIDs(ids []string) []string {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		var n int
+		if s.db.QueryRow("SELECT COUNT(*) FROM workers WHERE id=$1", id).Scan(&n) != nil || n == 0 {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// matchesOrder reports whether this worker is somebody the order may ring, on
+// the rules that need nothing beyond the two records in hand.
+//
+// Split out from candidatesFor so it can be tested: the rest of that function
+// is a database cursor and two lookups, and this is where the decision that
+// actually matters is made.
+//
+// An order that names its workers is judged differently. Category, gender and
+// radius are *matchmaking* rules — they exist to decide who to ring when nobody
+// has said. Here somebody has: the customer read these profiles and chose them.
+// Applying the rules on top would silently drop people they picked on purpose
+// (the neighbour who is filed under a different category, the worker a street
+// past the radius) and leave them watching a search that rings nobody, with no
+// way to find out why. What still applies is everything the worker could not
+// answer anyway — banned, offline, already on a job, unable to pay the
+// commission — which is checked by the caller.
+func matchesOrder(o *models.Order, wp *models.WorkerProfile) bool {
+	// You cannot be called to your own job.
+	if wp.UserID == o.CustomerID {
+		return false
+	}
+	if len(o.TargetWorkerIDs) > 0 {
+		return containsStr(o.TargetWorkerIDs, wp.ID)
+	}
+	if !containsStr(wp.CategoryIDs, o.CategoryID) {
+		return false
+	}
+	// Gender filter: if the order asks for male/female, only those match.
+	if o.Gender != "any" && wp.Gender != o.Gender {
+		return false
+	}
+	return geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng) <= matchRadiusKm
+}
+
 // candidatesFor returns every worker who could take this order right now:
-// online, not banned, does this category, matches the requested gender, is not
-// already on a job, can afford the commission, and is inside the match radius —
-// nearest first.
+// online, not banned, eligible under matchesOrder, not already on a job and able
+// to afford the commission — nearest first.
 func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 	rows, err := s.db.Query("SELECT " + workerCols + " FROM workers WHERE online=TRUE AND banned=FALSE")
 	if err != nil {
@@ -437,15 +512,7 @@ func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 		if err != nil {
 			continue
 		}
-		// You cannot be called to your own job.
-		if wp.UserID == o.CustomerID {
-			continue
-		}
-		if !containsStr(wp.CategoryIDs, o.CategoryID) {
-			continue
-		}
-		// Gender filter: if the order asks for male/female, only those match.
-		if o.Gender != "any" && wp.Gender != o.Gender {
+		if !matchesOrder(o, wp) {
 			continue
 		}
 		// Already on a job — not available until it is finished.
@@ -459,11 +526,7 @@ func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 		if !s.canWorkerAccept(wp) {
 			continue
 		}
-		d := geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng)
-		if d > matchRadiusKm {
-			continue
-		}
-		dist := d
+		dist := geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng)
 		wp.DistanceKm = &dist
 		out = append(out, *wp)
 	}

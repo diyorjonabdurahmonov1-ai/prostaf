@@ -305,6 +305,13 @@ type Order struct {
 	InviteExpiresAt  *time.Time `json:"invite_expires_at,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
 
+	// TargetWorkerIDs are the worker profiles the customer picked by hand from
+	// the nearby list. Empty is the normal case — the order is broadcast to
+	// everyone who matches. Non-empty means these workers and nobody else, and
+	// it overrides the category and gender filters: the customer looked at who
+	// these people are and chose them, which is a better signal than either.
+	TargetWorkerIDs []string `json:"target_worker_ids,omitempty"`
+
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.
 	RejectedWorkerIDs []string `json:"-"`

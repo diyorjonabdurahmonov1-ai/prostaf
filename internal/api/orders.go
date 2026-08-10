@@ -25,6 +25,9 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Price       int64   `json:"price"`
 		Lat         float64 `json:"lat"`
 		Lng         float64 `json:"lng"`
+		// TargetWorkerIDs are worker profile ids the customer picked from the
+		// nearby list. Absent or empty is the ordinary broadcast.
+		TargetWorkerIDs []string `json:"target_worker_ids"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -40,15 +43,17 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		ImageURL:    body.ImageURL,
 		Phone:       body.Phone,
 		Price:       body.Price,
-		Lat:         body.Lat,
-		Lng:         body.Lng,
+		Lat:             body.Lat,
+		Lng:             body.Lng,
+		TargetWorkerIDs: body.TargetWorkerIDs,
 	})
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	// The customer never picks a worker: the order goes straight out to every
-	// worker nearby and the first to accept takes it.
+	// Out it goes. With no workers named this rings everybody nearby who matches
+	// and the first to accept takes it; with a list, it rings exactly that list.
+	// Either way the customer waits rather than choosing again.
 	order = s.dispatch(order.ID, order)
 	writeJSON(w, http.StatusCreated, order)
 }

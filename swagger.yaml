@@ -879,6 +879,19 @@ paths:
                 lng:
                   type: number
                   format: double
+                target_worker_ids:
+                  type: array
+                  description: >
+                    Worker profile ids the customer picked by hand from the
+                    nearby list. Omit or send an empty list for the ordinary
+                    broadcast, where every matching worker within the match
+                    radius is rung. When set, the order is offered to these
+                    workers and to nobody else, and the category, gender and
+                    radius filters no longer apply — the customer looked at
+                    these profiles and chose them. Capped at 10; ids that are
+                    not worker profiles are dropped.
+                  items:
+                    type: string
       responses:
         "201":
           description: Order created
@@ -2344,6 +2357,13 @@ components:
           enum: [pending, matching, invited, accepted, in_progress, completed, cancelled, expired]
         invited_worker_ids:
           type: array
+          items:
+            type: string
+        target_worker_ids:
+          type: array
+          description: >
+            The workers the customer named when placing the order. Absent on an
+            ordinary broadcast.
           items:
             type: string
         invite_expires_at:
