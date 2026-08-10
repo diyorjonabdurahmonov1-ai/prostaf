@@ -598,7 +598,13 @@ func (s *Store) Redispatch(orderID, customerID string) (*models.Order, error) {
 		return nil, ErrForbidden
 	}
 	switch o.Status {
-	case models.StatusPending, models.StatusMatching, models.StatusInvited, models.StatusExpired:
+	case models.StatusPending, models.StatusMatching, models.StatusInvited,
+		models.StatusExpired,
+		// A search everybody declined is exactly the case "try again" is for:
+		// the UPDATE below clears rejected_worker_ids, so the second run rings
+		// them afresh — and without this the one order that most needs re-opening
+		// would be the one order that could not be.
+		models.StatusRejected:
 	default:
 		return nil, ErrConflict
 	}
@@ -692,19 +698,24 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	return o, wp, nil
 }
 
-// Reject drops a worker from the order. The search itself carries on until the
-// window closes — one worker saying no is not the customer's answer.
-func (s *Store) Reject(orderID, workerUserID string) (*models.Order, error) {
+// Reject drops a worker from the order. On a broadcast the search carries on
+// until the window closes — one worker saying no is not the customer's answer.
+//
+// The second return value says whether this decline was the *last* one: true
+// when the order named its workers and every one of them has now refused, in
+// which case the order has been closed as rejected here and the caller owes the
+// customer the news.
+func (s *Store) Reject(orderID, workerUserID string) (*models.Order, bool, error) {
 	o, ok := s.GetOrder(orderID)
 	if !ok {
-		return nil, ErrNotFound
+		return nil, false, ErrNotFound
 	}
 	wp, ok := s.GetWorkerByUser(workerUserID)
 	if !ok {
-		return nil, ErrForbidden
+		return nil, false, ErrForbidden
 	}
 	if !containsStr(o.InvitedWorkerIDs, wp.ID) {
-		return nil, ErrForbidden
+		return nil, false, ErrForbidden
 	}
 	invited := make([]string, 0, len(o.InvitedWorkerIDs))
 	for _, wid := range o.InvitedWorkerIDs {
@@ -718,7 +729,47 @@ func (s *Store) Reject(orderID, workerUserID string) (*models.Order, error) {
 	o.RejectedWorkerIDs = rejected
 	s.db.Exec("UPDATE orders SET invited_worker_ids=$1, rejected_worker_ids=$2 WHERE id=$3",
 		marshalJSON(invited), marshalJSON(rejected), orderID)
-	return o, nil
+
+	/**
+	 * A search with nobody left to ask is over.
+	 *
+	 * On a broadcast one decline means nothing — the order keeps ringing, and a
+	 * worker who comes online in the next minute is pulled in by the dispatch
+	 * loop, so ending it early would throw away a job somebody was about to
+	 * take. On an order that named its workers the set cannot grow: once every
+	 * one of them has declined there is no wave left to run, and leaving the
+	 * order "searching" meant the customer watched a two-minute countdown for a
+	 * search that was already finished, and was then told nobody was free —
+	 * when in fact the person they chose had answered, and said no.
+	 */
+	if s.allTargetsRejected(o) {
+		res, err := s.db.Exec(
+			`UPDATE orders SET status=$1, invite_expires_at=NULL
+			 WHERE id=$2 AND worker_id='' AND status IN ('pending','matching','invited')`,
+			models.StatusRejected, orderID)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				o.Status = models.StatusRejected
+				o.InviteExpiresAt = nil
+				return o, true, nil
+			}
+		}
+	}
+	return o, false, nil
+}
+
+// allTargetsRejected reports whether a hand-picked order has run out of people
+// to ask. Always false for a broadcast, whose candidate set is open-ended.
+func (s *Store) allTargetsRejected(o *models.Order) bool {
+	if len(o.TargetWorkerIDs) == 0 {
+		return false
+	}
+	for _, id := range o.TargetWorkerIDs {
+		if !containsStr(o.RejectedWorkerIDs, id) {
+			return false
+		}
+	}
+	return true
 }
 
 // ExpireIfSearching flips an order to expired only if the search is still

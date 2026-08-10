@@ -204,12 +204,28 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 //
 // One worker declining does not end the search — the order keeps ringing the
 // other workers nearby until somebody takes it or the window closes.
+//
+// Unless there is nobody else. An order that named its workers can run out of
+// people to ask, and when the last of them declines the customer hears about it
+// now rather than watching a countdown finish on a search that is already over.
+// The distinction matters to them: "nobody was free" invites trying again in ten
+// minutes, "they said no" invites picking somebody else.
 func (s *Server) handleWorkerReject(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
-	order, err := s.store.Reject(r.PathValue("id"), u.ID)
+	order, exhausted, err := s.store.Reject(r.PathValue("id"), u.ID)
 	if err != nil {
 		writeStoreError(w, err)
 		return
+	}
+	if exhausted {
+		s.publish(order.CustomerID, sse.Event{
+			Type: "order.rejected",
+			Data: map[string]any{"order": order},
+		})
+		s.notify(order.CustomerID, "order.rejected",
+			"Buyurtmangiz rad etildi",
+			"Siz tanlagan ishchi buyurtmani qabul qilmadi. Boshqa ishchi tanlang yoki narxni oshiring.",
+			map[string]any{"order_id": order.ID})
 	}
 	writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
 }

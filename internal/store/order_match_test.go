@@ -124,3 +124,60 @@ func TestMatchesOrderTargeted(t *testing.T) {
 		}
 	})
 }
+
+// When a decline is the customer's answer.
+//
+// This is what decides whether they are told "rad etildi" now or left watching a
+// countdown for two minutes and then told nobody was free. Getting it wrong in
+// the generous direction is worse: ending a broadcast on one refusal would kill
+// searches that somebody was about to accept.
+func TestAllTargetsRejected(t *testing.T) {
+	s := &Store{}
+	cases := []struct {
+		name     string
+		targets  []string
+		rejected []string
+		want     bool
+	}{
+		{
+			// A broadcast never runs out: the dispatch loop keeps pulling in
+			// workers who come online inside the window.
+			name:     "a broadcast is never exhausted",
+			targets:  nil,
+			rejected: []string{"w1", "w2", "w3"},
+			want:     false,
+		},
+		{
+			name:     "the only worker asked said no",
+			targets:  []string{"w1"},
+			rejected: []string{"w1"},
+			want:     true,
+		},
+		{
+			name:     "one of three has declined",
+			targets:  []string{"w1", "w2", "w3"},
+			rejected: []string{"w2"},
+			want:     false,
+		},
+		{
+			name:     "the last of three declines",
+			targets:  []string{"w1", "w2", "w3"},
+			rejected: []string{"w2", "w3", "w1"},
+			want:     true,
+		},
+		{
+			name:     "nobody has answered yet",
+			targets:  []string{"w1", "w2"},
+			rejected: nil,
+			want:     false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := &models.Order{TargetWorkerIDs: tc.targets, RejectedWorkerIDs: tc.rejected}
+			if got := s.allTargetsRejected(o); got != tc.want {
+				t.Errorf("allTargetsRejected = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

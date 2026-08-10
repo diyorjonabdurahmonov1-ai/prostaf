@@ -2354,7 +2354,7 @@ components:
           format: double
         status:
           type: string
-          enum: [pending, matching, invited, accepted, in_progress, completed, cancelled, expired]
+          enum: [pending, matching, invited, accepted, in_progress, completed, cancelled, rejected, expired]
         invited_worker_ids:
           type: array
           items:

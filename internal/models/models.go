@@ -22,6 +22,14 @@ const (
 	StatusCompleted  = "completed"
 	StatusCancelled  = "cancelled"
 	StatusExpired    = "expired"
+	// StatusRejected is a search that ended because everybody it could reach
+	// said no — which only happens on an order that named its workers, since a
+	// broadcast can always be answered by somebody who comes online next.
+	//
+	// Distinct from StatusExpired on purpose. Both end with no worker, and they
+	// are different news: "nobody was free" is worth trying again in ten
+	// minutes, "the person you picked declined" is worth picking somebody else.
+	StatusRejected = "rejected"
 )
 
 // User is an account. worker_profile / company_profile / wallet are hydrated
