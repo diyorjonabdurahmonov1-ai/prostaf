@@ -38,6 +38,8 @@ type OrderInput struct {
 	TargetWorkerIDs []string
 	// BatchID groups orders placed as one request — see models.Order.
 	BatchID string
+	// BatchSize is how many orders that request was split into. Zero reads as one.
+	BatchSize int
 }
 
 // A worker or company is "busy" while one of their orders is accepted or
@@ -105,9 +107,13 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
 		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs,
-		&o.BatchID)
+		&o.BatchID, &o.BatchSize)
 	if err != nil {
 		return nil, err
+	}
+	// A row from before the column existed, or a lone order: one of one.
+	if o.BatchSize < 1 {
+		o.BatchSize = 1
 	}
 	o.InvitedWorkerIDs = unmarshalStrings(invitedIDs)
 	o.RejectedWorkerIDs = unmarshalStrings(rejectedIDs)
@@ -124,7 +130,7 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	return &o, nil
 }
 
-const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids, batch_id"
+const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids, batch_id, batch_size"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -182,14 +188,15 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		RejectedWorkerIDs: []string{},
 		TargetWorkerIDs:   targets,
 		BatchID:           in.BatchID,
+		BatchSize:         max(in.BatchSize, 1),
 		InviteExpiresAt:   &expires,
 		CreatedAt:         time.Now(),
 	}
 	normalizeOrderPhotos(o)
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
 		o.ID, o.CustomerID, "", "", o.CategoryID, o.Gender, o.Description, o.ImageURL,
 		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
-		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs), o.BatchID); err != nil {
+		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs), o.BatchID, o.BatchSize); err != nil {
 		log.Printf("store: order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -261,10 +268,10 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 		CreatedAt:         time.Now(),
 	}
 	normalizeOrderPhotos(o)
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)",
 		o.ID, o.CustomerID, "", o.CompanyID, "", o.Gender, o.Description, o.ImageURL,
 		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", nil, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
-		marshalJSON(o.Images), "[]", ""); err != nil {
+		marshalJSON(o.Images), "[]", "", 1); err != nil {
 		log.Printf("store: company order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -617,6 +624,10 @@ func (s *Store) DispatchWave(orderID string) (*models.Order, []string, bool) {
 		return o, nil, false
 	}
 
+	// Read once: the sweep is a full scan of the online workers plus a busy check
+	// each, and it was being run twice per wave.
+	candidates := s.candidatesFor(o)
+
 	/**
 	 * How many new workers this wave may claim.
 	 *
@@ -634,16 +645,26 @@ func (s *Store) DispatchWave(orderID string) (*models.Order, []string, bool) {
 	 * worker must still be allowed to reach them.
 	 */
 	share := 0
-	if _, siblings := s.batchEngagedWorkers(o); siblings > 0 {
-		available := len(s.candidatesFor(o))
-		share = (available + siblings) / (siblings + 1)
-		if share < 1 {
-			share = 1
+	if o.BatchID != "" {
+		// How many others are sharing the pool. `BatchSize` is what the request
+		// said it was splitting into and is right from the very first wave, when
+		// the sibling rows may not be committed yet; the count of siblings
+		// actually searching is right later on, once some have been answered and
+		// the rest are what is left. Whichever is larger is the safe divisor —
+		// under-counting is what lets one order take everybody.
+		_, searching := s.batchEngagedWorkers(o)
+		siblings := max(o.BatchSize-1, searching)
+		if siblings > 0 {
+			available := len(candidates)
+			share = (available + siblings) / (siblings + 1)
+			if share < 1 {
+				share = 1
+			}
 		}
 	}
 
 	var newProfileIDs, newUserIDs []string
-	for _, wp := range s.candidatesFor(o) {
+	for _, wp := range candidates {
 		if containsStr(o.InvitedWorkerIDs, wp.ID) || containsStr(o.RejectedWorkerIDs, wp.ID) {
 			continue
 		}

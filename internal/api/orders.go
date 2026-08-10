@@ -32,6 +32,9 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		// helpers" is five orders sharing it). The client mints it; the server
 		// only needs the orders to agree on it. Empty for a single order.
 		BatchID string `json:"batch_id"`
+		// BatchSize is how many orders that request was split into, so the very
+		// first wave can share the free workers out — see the migration.
+		BatchSize int `json:"batch_size"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -51,6 +54,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Lng:             body.Lng,
 		TargetWorkerIDs: body.TargetWorkerIDs,
 		BatchID:         body.BatchID,
+		BatchSize:       body.BatchSize,
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -252,7 +256,21 @@ func (s *Server) expireIfDue(orderID string) {
 // dispatchLoop keeps re-broadcasting until the order is taken or the window
 // closes. It is bounded by the invite window, so it always ends.
 func (s *Server) dispatchLoop(orderID string) {
-	var batchID string
+	/**
+	 * Read before the loop, not from the order the loop fetches.
+	 *
+	 * Taking it from the result meant the *first* repeat wave ran with an empty
+	 * batch id — and an empty id takes no lock at all. Twelve seconds after a
+	 * five-worker request went out, its five loops woke together, each read the
+	 * engaged set before any of them had written to it, and each invited the
+	 * same workers again: every nearby phone collected a second and third copy
+	 * of the same job. The one wave that most needed the lock was the one that
+	 * skipped it.
+	 */
+	batchID := ""
+	if o, ok := s.store.GetOrder(orderID); ok {
+		batchID = o.BatchID
+	}
 	for {
 		time.Sleep(store.DispatchInterval)
 		// Same lock as the first wave: the repeat waves of five sibling orders
@@ -264,7 +282,6 @@ func (s *Server) dispatchLoop(orderID string) {
 		if order == nil {
 			return
 		}
-		batchID = order.BatchID
 		s.notifyInvited(order, workerUserIDs)
 		if !searching {
 			break

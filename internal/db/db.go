@@ -449,6 +449,16 @@ func migrate(db *sql.DB) {
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_batch ON orders(batch_id) WHERE batch_id <> ''`,
 
+		// How many orders the request was split into.
+		//
+		// Carried rather than counted, because the five POSTs arrive together:
+		// the first of them to reach dispatch can see none of its siblings in the
+		// table yet, conclude it is alone, and claim every free worker — leaving
+		// the other four to ring nobody and time out while the customer waits for
+		// five people. Knowing the size up front is what lets the very first wave
+		// take a fair share instead.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_size INTEGER NOT NULL DEFAULT 1`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

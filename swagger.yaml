@@ -887,6 +887,15 @@ paths:
                     each worker only one order out of a batch, so a worker sees
                     one card rather than five. Minted by the client; the server
                     only needs the orders to agree on it. Omit for a single order.
+                batch_size:
+                  type: integer
+                  minimum: 1
+                  description: >
+                    How many orders the request was split into. Sent with
+                    batch_id so the very first dispatch wave can share the free
+                    workers out between the siblings — without it the first order
+                    to reach dispatch sees none of the others in the table yet,
+                    claims every free worker, and the rest ring nobody.
                 target_worker_ids:
                   type: array
                   description: >
@@ -2379,6 +2388,9 @@ components:
           description: >
             Set when this order was placed as part of one multi-worker request.
             Absent on an ordinary single order.
+        batch_size:
+          type: integer
+          description: How many orders that request was split into.
         invite_expires_at:
           type: string
           format: date-time

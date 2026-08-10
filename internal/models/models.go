@@ -325,6 +325,9 @@ type Order struct {
 	// each worker only one of them at a time, so a worker sees one card rather
 	// than five. Empty on an ordinary single order.
 	BatchID string `json:"batch_id,omitempty"`
+	// BatchSize is how many orders that request was split into — 1 for an
+	// ordinary order. See BatchID.
+	BatchSize int `json:"batch_size,omitempty"`
 
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.
