@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"sync"
 
 	"prostaff/internal/atmos"
 	"prostaff/internal/config"
@@ -33,15 +34,51 @@ type Server struct {
 	// account is configured — everything then falls back to Expo, as before.
 	fcm     *fcm.Client
 	handler http.Handler
+
+	// batchMu serialises dispatch within one multi-worker request — see
+	// lockBatch. Guarded by its own mutex because the map itself is shared.
+	batchMuMu sync.Mutex
+	batchMu   map[string]*sync.Mutex
+}
+
+/**
+ * lockBatch serialises the dispatch of orders placed as one request.
+ *
+ * The five orders behind "I need five helpers" are five POSTs, sent at once, and
+ * each dispatches its first wave inline. `batchEngagedWorkers` asks which
+ * workers a sibling order is already ringing — and read concurrently, all five
+ * asked before any of them had written an answer. Every one of them saw an empty
+ * set, and every nearby worker got five cards: exactly the pile this was built
+ * to prevent, in the one case it exists for.
+ *
+ * The waves are therefore taken one at a time per batch. They are short, they
+ * are per-request rather than global, and an ordinary single order takes no lock
+ * at all.
+ */
+func (s *Server) lockBatch(batchID string) func() {
+	if batchID == "" {
+		return func() {}
+	}
+	s.batchMuMu.Lock()
+	mu, ok := s.batchMu[batchID]
+	if !ok {
+		mu = &sync.Mutex{}
+		s.batchMu[batchID] = mu
+	}
+	s.batchMuMu.Unlock()
+
+	mu.Lock()
+	return mu.Unlock
 }
 
 // NewServer builds a Server with all routes and middleware wired.
 func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 	s := &Server{
-		cfg:   cfg,
-		store: st,
-		hub:   hub,
-		ws:    ws.NewHub(),
+		cfg:     cfg,
+		store:   st,
+		hub:     hub,
+		ws:      ws.NewHub(),
+		batchMu: map[string]*sync.Mutex{},
 		atmos: atmos.New(atmos.Config{
 			BaseURL:        cfg.AtmosBaseURL,
 			CheckoutURL:    cfg.AtmosCheckoutURL,

@@ -523,29 +523,31 @@ func matchesOrder(o *models.Order, wp *models.WorkerProfile) bool {
  * with two workers and five orders, two get answered and the other three run
  * their window out, which is the honest outcome.
  */
-func (s *Store) batchEngagedWorkers(o *models.Order) map[string]bool {
+func (s *Store) batchEngagedWorkers(o *models.Order) (map[string]bool, int) {
 	engaged := map[string]bool{}
 	if o.BatchID == "" {
-		return engaged
+		return engaged, 0
 	}
 	rows, err := s.db.Query(
 		`SELECT invited_worker_ids FROM orders
 		 WHERE batch_id=$1 AND id<>$2 AND status IN ('pending','matching','invited')`,
 		o.BatchID, o.ID)
 	if err != nil {
-		return engaged
+		return engaged, 0
 	}
 	defer rows.Close()
+	siblings := 0
 	for rows.Next() {
 		var invited string
 		if rows.Scan(&invited) != nil {
 			continue
 		}
+		siblings++
 		for _, id := range unmarshalStrings(invited) {
 			engaged[id] = true
 		}
 	}
-	return engaged
+	return engaged, siblings
 }
 
 // candidatesFor returns every worker who could take this order right now:
@@ -554,7 +556,7 @@ func (s *Store) batchEngagedWorkers(o *models.Order) map[string]bool {
 // nearest first.
 func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 	// One read for the whole sweep rather than a query per candidate.
-	engaged := s.batchEngagedWorkers(o)
+	engaged, _ := s.batchEngagedWorkers(o)
 
 	rows, err := s.db.Query("SELECT " + workerCols + " FROM workers WHERE online=TRUE AND banned=FALSE")
 	if err != nil {
@@ -615,10 +617,38 @@ func (s *Store) DispatchWave(orderID string) (*models.Order, []string, bool) {
 		return o, nil, false
 	}
 
+	/**
+	 * How many new workers this wave may claim.
+	 *
+	 * A lone order takes everybody: that is the broadcast, and the whole point is
+	 * that the first free phone answers fast.
+	 *
+	 * An order that is one of five behaves differently, because its siblings need
+	 * workers too. Left to take all ten nearby workers, the first order of the
+	 * batch would engage every one of them and the other four would find nobody —
+	 * so the five would fill strictly one after another, each waiting for the
+	 * previous to be answered. Sharing the free workers out means all five search
+	 * at once, which is what asking for five people at once should do.
+	 *
+	 * Rounded up, and never below one: an order that can only reach a single
+	 * worker must still be allowed to reach them.
+	 */
+	share := 0
+	if _, siblings := s.batchEngagedWorkers(o); siblings > 0 {
+		available := len(s.candidatesFor(o))
+		share = (available + siblings) / (siblings + 1)
+		if share < 1 {
+			share = 1
+		}
+	}
+
 	var newProfileIDs, newUserIDs []string
 	for _, wp := range s.candidatesFor(o) {
 		if containsStr(o.InvitedWorkerIDs, wp.ID) || containsStr(o.RejectedWorkerIDs, wp.ID) {
 			continue
+		}
+		if share > 0 && len(newProfileIDs) >= share {
+			break
 		}
 		newProfileIDs = append(newProfileIDs, wp.ID)
 		newUserIDs = append(newUserIDs, wp.UserID)

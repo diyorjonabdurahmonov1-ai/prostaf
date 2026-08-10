@@ -177,6 +177,14 @@ func (s *Server) handleOrderCustomer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, card)
 }
 
+// batchOf is the request an order belongs to, or "" when it stands alone.
+func batchOf(o *models.Order) string {
+	if o == nil {
+		return ""
+	}
+	return o.BatchID
+}
+
 // POST /orders/{id}/dispatch — search again for an order nobody took.
 func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
@@ -200,7 +208,11 @@ func (s *Server) handleRedispatch(w http.ResponseWriter, r *http.Request) {
 //
 // fallback is returned if the order vanished underneath us.
 func (s *Server) dispatch(orderID string, fallback *models.Order) *models.Order {
+	// One wave at a time within a multi-worker request, so each order sees who
+	// its siblings have already claimed. See lockBatch.
+	unlock := s.lockBatch(batchOf(fallback))
 	order, workerUserIDs, searching := s.store.DispatchWave(orderID)
+	unlock()
 	if order == nil {
 		return fallback
 	}
@@ -240,12 +252,19 @@ func (s *Server) expireIfDue(orderID string) {
 // dispatchLoop keeps re-broadcasting until the order is taken or the window
 // closes. It is bounded by the invite window, so it always ends.
 func (s *Server) dispatchLoop(orderID string) {
+	var batchID string
 	for {
 		time.Sleep(store.DispatchInterval)
+		// Same lock as the first wave: the repeat waves of five sibling orders
+		// run on five goroutines and would otherwise read each other's claims
+		// half-written, handing the same worker to more than one of them.
+		unlock := s.lockBatch(batchID)
 		order, workerUserIDs, searching := s.store.DispatchWave(orderID)
+		unlock()
 		if order == nil {
 			return
 		}
+		batchID = order.BatchID
 		s.notifyInvited(order, workerUserIDs)
 		if !searching {
 			break
