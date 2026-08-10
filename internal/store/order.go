@@ -2,8 +2,10 @@ package store
 
 import (
 	"database/sql"
+	"fmt"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"prostaff/internal/geo"
@@ -36,16 +38,23 @@ type OrderInput struct {
 	// TargetWorkerIDs narrows the search to workers the customer picked by hand.
 	// Empty is the ordinary broadcast — see models.Order.
 	TargetWorkerIDs []string
+	// WorkersNeeded is how many people the job takes. Zero reads as one.
+	WorkersNeeded int
 }
 
 // A worker or company is "busy" while one of their orders is accepted or
 // in_progress; until it is completed they cannot be given another job.
 
 // WorkerIsBusy reports whether the worker is already on a job.
+// Read through order_workers rather than orders.worker_id: on a job that takes
+// five people only the first of them is named in that column, and the other four
+// would have looked free while they were on their way to a banquet.
 func (s *Store) WorkerIsBusy(workerUserID string) bool {
 	var n int
 	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM orders WHERE worker_id=$1 AND status IN ('accepted','in_progress')",
+		`SELECT COUNT(*) FROM order_workers ow
+		 JOIN orders o ON o.id = ow.order_id
+		 WHERE ow.worker_id=$1 AND o.status IN ('accepted','in_progress')`,
 		workerUserID).Scan(&n)
 	return err == nil && n > 0
 }
@@ -61,11 +70,15 @@ func (s *Store) HasHiredWorker(customerID, workerUserID string) bool {
 	if customerID == "" || workerUserID == "" {
 		return false
 	}
+	// Through order_workers: on a five-person job `orders.worker_id` names one
+	// of the five, so four people who worked in this customer's home would have
+	// gone on hiding their number from them afterwards.
 	var n int
 	err := s.db.QueryRow(
-		`SELECT COUNT(*) FROM orders
-		 WHERE customer_id=$1 AND worker_id=$2
-		   AND status IN ('accepted','in_progress','completed')`,
+		`SELECT COUNT(*) FROM order_workers ow
+		 JOIN orders o ON o.id = ow.order_id
+		 WHERE o.customer_id=$1 AND ow.worker_id=$2
+		   AND o.status IN ('accepted','in_progress','completed')`,
 		customerID, workerUserID).Scan(&n)
 	return err == nil && n > 0
 }
@@ -102,9 +115,15 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
-		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs)
+		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs,
+		&o.WorkersNeeded)
 	if err != nil {
 		return nil, err
+	}
+	// A row written before the column existed reads as 0, which no order ever
+	// means — every job takes at least one person.
+	if o.WorkersNeeded < 1 {
+		o.WorkersNeeded = 1
 	}
 	o.InvitedWorkerIDs = unmarshalStrings(invitedIDs)
 	o.RejectedWorkerIDs = unmarshalStrings(rejectedIDs)
@@ -121,7 +140,106 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	return &o, nil
 }
 
-const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids"
+const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids, workers_needed"
+
+/**
+ * The crew, attached to an order that has been read.
+ *
+ * A join rather than a column, so this is a second query — deliberately not
+ * folded into `scanOrder`, which runs inside a `rows.Next()` loop in half a
+ * dozen listings and would turn each of them into a query per row. Callers that
+ * hand an order to somebody ask for the crew explicitly.
+ */
+func (s *Store) loadOrderWorkers(o *models.Order) {
+	if o == nil {
+		return
+	}
+	o.AcceptedWorkers = s.OrderWorkers(o.ID)
+}
+
+// OrderWorkers is everyone who has accepted this job, oldest first.
+func (s *Store) OrderWorkers(orderID string) []models.OrderWorker {
+	out := []models.OrderWorker{}
+	rows, err := s.db.Query(
+		`SELECT worker_id, worker_name, phone, created_at FROM order_workers
+		 WHERE order_id=$1 ORDER BY created_at`, orderID)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ow models.OrderWorker
+		if rows.Scan(&ow.WorkerID, &ow.Name, &ow.Phone, &ow.CreatedAt) == nil {
+			out = append(out, ow)
+		}
+	}
+	return out
+}
+
+/**
+ * The crews for a whole listing, in one query.
+ *
+ * The per-order loader is fine for a single read and wrong inside a loop: the
+ * customer's order list is thirty rows on a busy account, and hydrating it a row
+ * at a time is thirty round trips for a screen that already had its data.
+ */
+func (s *Store) loadOrderWorkersBatch(orders []models.Order) {
+	if len(orders) == 0 {
+		return
+	}
+	placeholders := make([]string, len(orders))
+	args := make([]any, len(orders))
+	for i := range orders {
+		placeholders[i] = fmt.Sprintf("$%d", i+1)
+		args[i] = orders[i].ID
+		orders[i].AcceptedWorkers = []models.OrderWorker{}
+	}
+	rows, err := s.db.Query(
+		`SELECT order_id, worker_id, worker_name, phone, created_at FROM order_workers
+		 WHERE order_id IN (`+strings.Join(placeholders, ",")+`) ORDER BY created_at`, args...)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+
+	byOrder := map[string][]models.OrderWorker{}
+	for rows.Next() {
+		var orderID string
+		var ow models.OrderWorker
+		if rows.Scan(&orderID, &ow.WorkerID, &ow.Name, &ow.Phone, &ow.CreatedAt) == nil {
+			byOrder[orderID] = append(byOrder[orderID], ow)
+		}
+	}
+	for i := range orders {
+		if crew, ok := byOrder[orders[i].ID]; ok {
+			orders[i].AcceptedWorkers = crew
+		}
+	}
+}
+
+// countOrderWorkers is how many have accepted so far.
+func (s *Store) countOrderWorkers(orderID string) int {
+	var n int
+	s.db.QueryRow("SELECT COUNT(*) FROM order_workers WHERE order_id=$1", orderID).Scan(&n)
+	return n
+}
+
+// OrderIsFull reports whether the job already has everybody it needs.
+func (s *Store) OrderIsFull(o *models.Order) bool {
+	return s.countOrderWorkers(o.ID) >= o.WorkersNeeded
+}
+
+// WorkerOnOrder reports whether this worker holds a place on the job.
+func (s *Store) WorkerOnOrder(orderID, workerUserID string) bool {
+	var n int
+	s.db.QueryRow("SELECT COUNT(*) FROM order_workers WHERE order_id=$1 AND worker_id=$2",
+		orderID, workerUserID).Scan(&n)
+	return n > 0
+}
+
+// maxWorkersPerOrder caps one job. Past this it is a staffing contract, not an
+// order, and the office should be arranging it rather than the app.
+const maxWorkersPerOrder = 20
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -157,6 +275,21 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		targets = targets[:maxTargetWorkers]
 	}
 
+	needed := in.WorkersNeeded
+	if needed < 1 {
+		needed = 1
+	}
+	if needed > maxWorkersPerOrder {
+		needed = maxWorkersPerOrder
+	}
+	// Naming five workers is asking for five people. Left unreconciled, an order
+	// could ring exactly the three workers the customer chose while claiming to
+	// need five, and then keep searching for two who were never allowed to be
+	// found — a countdown that could not finish, by construction.
+	if len(targets) > 0 && needed > len(targets) {
+		needed = len(targets)
+	}
+
 	// The order starts searching the moment it is created — with no targets it
 	// goes out to every matching worker nearby (see DispatchWave).
 	expires := time.Now().Add(InviteTTL)
@@ -177,14 +310,16 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		InvitedWorkerIDs:  []string{},
 		RejectedWorkerIDs: []string{},
 		TargetWorkerIDs:   targets,
+		WorkersNeeded:     needed,
+		AcceptedWorkers:   []models.OrderWorker{},
 		InviteExpiresAt:   &expires,
 		CreatedAt:         time.Now(),
 	}
 	normalizeOrderPhotos(o)
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
 		o.ID, o.CustomerID, "", "", o.CategoryID, o.Gender, o.Description, o.ImageURL,
 		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
-		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs)); err != nil {
+		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs), o.WorkersNeeded); err != nil {
 		log.Printf("store: order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -351,6 +486,10 @@ func (s *Store) GetOrder(orderID string) (*models.Order, bool) {
 	if err != nil {
 		return nil, false
 	}
+	// Hydrated here rather than at each call site: every reader of a single
+	// order wants to know who is on it, and one that quietly did not would show
+	// a five-person job as unstaffed.
+	s.loadOrderWorkers(o)
 	return o, true
 }
 
@@ -368,6 +507,7 @@ func (s *Store) ListOrdersByCustomer(customerID string) []models.Order {
 			out = append(out, *o)
 		}
 	}
+	s.loadOrderWorkersBatch(out)
 	return out
 }
 
@@ -424,17 +564,29 @@ func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.
 		if !since.IsZero() && !o.CreatedAt.After(since) {
 			continue
 		}
-		if o.WorkerID == workerUserID {
+		// A place on the job is a job, whether or not this worker was the first
+		// to take it — on a five-person order only the first is in `worker_id`.
+		if s.WorkerOnOrder(o.ID, workerUserID) {
+			s.loadOrderWorkers(o)
 			out = append(out, *o)
 			continue
 		}
-		// Invited, but somebody else answered first — the offer is over.
-		if o.WorkerID != "" {
+		if !containsStr(o.InvitedWorkerIDs, wp.ID) {
 			continue
 		}
-		if containsStr(o.InvitedWorkerIDs, wp.ID) {
-			out = append(out, *o)
+		// Invited, and the job still has room. A one-person order fills on the
+		// first yes, which is the old behaviour exactly; a five-person one stays
+		// on everybody's screen until the fifth.
+		switch o.Status {
+		case models.StatusPending, models.StatusMatching, models.StatusInvited:
+		default:
+			continue
 		}
+		if s.OrderIsFull(o) {
+			continue
+		}
+		s.loadOrderWorkers(o)
+		out = append(out, *o)
 	}
 	return out
 }
@@ -515,6 +667,11 @@ func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 		if !matchesOrder(o, wp) {
 			continue
 		}
+		// Already holds a place on this very job — a five-person order must not
+		// ring somebody it has already got.
+		if s.WorkerOnOrder(o.ID, wp.UserID) {
+			continue
+		}
 		// Already on a job — not available until it is finished.
 		if s.WorkerIsBusy(wp.UserID) {
 			continue
@@ -570,11 +727,17 @@ func (s *Store) DispatchWave(orderID string) (*models.Order, []string, bool) {
 	}
 
 	invited := append(append([]string{}, o.InvitedWorkerIDs...), newProfileIDs...)
-	// Guarded update: if the order was taken or cancelled between the read and
+	// Guarded update: if the order was filled or cancelled between the read and
 	// here, it must not be resurrected — and those workers must not be rung.
+	//
+	// Status is the whole guard. It used to also require `worker_id=''`, which
+	// was the same question while a job took one person and is the wrong one
+	// now: the first of five acceptances writes that column, and the wave that
+	// should go looking for the other four would have found the order already
+	// spoken for and stopped.
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, invited_worker_ids=$2
-		 WHERE id=$3 AND worker_id='' AND status IN ('pending','matching','invited')`,
+		 WHERE id=$3 AND status IN ('pending','matching','invited')`,
 		models.StatusInvited, marshalJSON(invited), orderID)
 	if err != nil {
 		return o, nil, false
@@ -626,9 +789,18 @@ func (s *Store) Redispatch(orderID, customerID string) (*models.Order, error) {
 	return o, nil
 }
 
-// Accept hands the order to the first worker who takes it. Every other worker
-// the order was broadcast to loses the race here: the assignment is a single
-// guarded UPDATE, so exactly one of N simultaneous taps can win.
+// Accept gives a worker a place on the job.
+//
+// A job takes as many people as it says it takes. For the ordinary one-person
+// order this is what it always was — the first yes wins and everybody else gets
+// a conflict — because "full" and "taken" are the same thing when the job needs
+// one. For a banquet that needs five, the first four acceptances leave the
+// search running and the fifth closes it.
+//
+// The place is claimed inside a transaction that locks the order row, because
+// the check that matters ("is there room?") is a count of another table: two
+// workers reading four-of-five at the same moment would both see room and both
+// take the fifth place. The lock is what makes exactly one of them right.
 func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.WorkerProfile, error) {
 	o, ok := s.GetOrder(orderID)
 	if !ok {
@@ -638,7 +810,7 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	if !ok {
 		return nil, nil, ErrForbidden
 	}
-	if o.WorkerID != "" || (o.Status != models.StatusInvited && o.Status != models.StatusMatching) {
+	if o.Status != models.StatusInvited && o.Status != models.StatusMatching {
 		return nil, nil, ErrConflict
 	}
 	if o.InviteExpiresAt != nil && time.Now().After(*o.InviteExpiresAt) {
@@ -658,44 +830,134 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	if !s.canWorkerAccept(wp) {
 		return nil, nil, ErrInsufficientBalance
 	}
-	// Commission is taken on the agreed price of this job.
+	// Commission is taken on the agreed price of this job. Each worker on a
+	// five-person job is paid the price and pays commission on it — the price is
+	// per person, which is what the customer was shown when they set it.
 	base := o.Price
 	if base <= 0 {
 		base = wp.PriceMin
 	}
 	commission := base * int64(s.settings.CommissionPercent) / 100
 
-	// The winner is decided by the database, not by the order of the checks
-	// above — two workers reaching this line together both pass every check.
-	res, err := s.db.Exec(
-		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL, commission_amount=$4
-		 WHERE id=$5 AND worker_id='' AND status IN ('matching','invited')`,
-		models.StatusAccepted, workerUserID, wp.Phone, commission, orderID)
+	filled, err := s.claimPlace(o, wp, commission)
 	if err != nil {
-		return nil, nil, ErrConflict
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		// Somebody else was a fraction of a second faster.
-		return nil, nil, ErrConflict
-	}
-	// Only the winner pays — and a worker still inside their three free jobs
-	// spends one of those instead of the commission. The order row is corrected
-	// afterwards rather than before, because whether the job is free is only
-	// settled by the atomic consume inside the call.
-	charged := s.chargeWorkerAcceptance(wp, commission)
-	if charged != commission {
-		s.db.Exec("UPDATE orders SET commission_amount=$1 WHERE id=$2", charged, orderID)
+		return nil, nil, err
 	}
 
-	o.Status = models.StatusAccepted
-	o.WorkerID = workerUserID
-	o.WorkerPhone = wp.Phone
-	o.InviteExpiresAt = nil
-	o.CommissionAmount = charged
+	// Only workers who got a place pay — and one still inside their three free
+	// jobs spends one of those instead of the commission. Settled after the
+	// claim, because whether the job is free is only decided by the atomic
+	// consume inside the call.
+	charged := s.chargeWorkerAcceptance(wp, commission)
+	if charged != commission {
+		s.db.Exec("UPDATE order_workers SET commission=$1 WHERE order_id=$2 AND worker_id=$3",
+			charged, orderID, workerUserID)
+		if o.WorkerID == workerUserID {
+			s.db.Exec("UPDATE orders SET commission_amount=$1 WHERE id=$2", charged, orderID)
+		}
+	}
+
+	// Re-read: the claim moved the status, the first-accepter columns and the
+	// crew, and the caller hands this straight to both the worker and the
+	// customer.
+	if fresh, ok := s.GetOrder(orderID); ok {
+		o = fresh
+	}
+	s.loadOrderWorkers(o)
+	if o.WorkerID == workerUserID {
+		o.CommissionAmount = charged
+	}
+	_ = filled
 	// The profile handed back is what the app redraws its banner from, so it has
 	// to know a trial job was just spent.
 	wp.FreeOrdersUsed = s.freeOrdersUsed(WorkerTrialKey(wp.PassportSeries))
 	return o, wp, nil
+}
+
+/**
+ * claimPlace takes one of the job's places for this worker, or fails.
+ *
+ * Everything here is one transaction over a locked order row. The question it
+ * answers — "is there still room?" — is a count of `order_workers`, so without
+ * the lock two workers can both read four-of-five and both take the fifth
+ * place: a customer who asked for five would get six people and pay six.
+ *
+ * Returns whether this claim was the one that filled the job.
+ */
+func (s *Store) claimPlace(o *models.Order, wp *models.WorkerProfile, commission int64) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, ErrConflict
+	}
+	defer tx.Rollback()
+
+	// The lock, and the state as of holding it — the order may have been filled
+	// or cancelled between the checks above and here.
+	var needed int
+	var status, firstWorker string
+	if err := tx.QueryRow(
+		`SELECT workers_needed, status, worker_id FROM orders WHERE id=$1 FOR UPDATE`,
+		o.ID).Scan(&needed, &status, &firstWorker); err != nil {
+		return false, ErrConflict
+	}
+	if needed < 1 {
+		needed = 1
+	}
+	if status != models.StatusInvited && status != models.StatusMatching {
+		return false, ErrConflict
+	}
+
+	var taken int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM order_workers WHERE order_id=$1`, o.ID).Scan(&taken); err != nil {
+		return false, ErrConflict
+	}
+	if taken >= needed {
+		return false, ErrConflict
+	}
+
+	// ON CONFLICT rather than a prior check: the primary key is what makes a
+	// double tap idempotent, and a worker already on the job has not found a
+	// second place on it.
+	res, err := tx.Exec(
+		`INSERT INTO order_workers (order_id, worker_id, worker_name, phone, commission)
+		 VALUES ($1,$2,$3,$4,$5) ON CONFLICT DO NOTHING`,
+		o.ID, wp.UserID, wp.FullName, wp.Phone, commission)
+	if err != nil {
+		return false, ErrConflict
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, ErrConflict
+	}
+	taken++
+
+	// The first worker to accept also lands in the order's own columns. Every
+	// screen written before a job could take five people reads `worker_id` and
+	// `worker_phone`, and showing them nobody is worse than showing them one of
+	// the five.
+	if firstWorker == "" {
+		if _, err := tx.Exec(
+			`UPDATE orders SET worker_id=$1, worker_phone=$2, commission_amount=$3 WHERE id=$4`,
+			wp.UserID, wp.Phone, commission, o.ID); err != nil {
+			return false, ErrConflict
+		}
+	}
+
+	// Full: the search is over. Short of full: it keeps running, so the order
+	// stays `invited` with its window open and the dispatch loop keeps looking
+	// for the people still missing.
+	full := taken >= needed
+	if full {
+		if _, err := tx.Exec(
+			`UPDATE orders SET status=$1, invite_expires_at=NULL WHERE id=$2`,
+			models.StatusAccepted, o.ID); err != nil {
+			return false, ErrConflict
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, ErrConflict
+	}
+	return full, nil
 }
 
 // Reject drops a worker from the order. On a broadcast the search carries on
@@ -772,17 +1034,31 @@ func (s *Store) allTargetsRejected(o *models.Order) bool {
 	return true
 }
 
-// ExpireIfSearching flips an order to expired only if the search is still
-// running and its window has actually run out. An order somebody already took
-// is left alone, and so is one the customer just re-opened — otherwise a
-// dispatch loop finishing a fraction of a second late would kill a search that
-// had only just started again.
+// ExpireIfSearching closes a search whose window has run out. An order somebody
+// already took is left alone, and so is one the customer just re-opened —
+// otherwise a dispatch loop finishing a fraction of a second late would kill a
+// search that had only just started again.
+//
+// The second return value is whether anybody is coming. A five-person job that
+// found three is not a failed order: three people accepted, they are on their
+// way, and telling the customer "nobody took it" would be false and would offer
+// them a "try again" that re-opens a job three workers are already committed to.
+// Such an order closes as `accepted` — short-staffed, but a job. Only a search
+// that found nobody at all expires.
 func (s *Store) ExpireIfSearching(orderID string) (*models.Order, bool) {
+	// `worker_id=''` is not the test any more: it names the first of five, so a
+	// partly-staffed job would have slipped past this and stayed "searching"
+	// forever with a dead window.
+	taken := s.countOrderWorkers(orderID)
+	status := models.StatusExpired
+	if taken > 0 {
+		status = models.StatusAccepted
+	}
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, invite_expires_at=NULL
-		 WHERE id=$2 AND worker_id='' AND status IN ('pending','matching','invited')
+		 WHERE id=$2 AND status IN ('pending','matching','invited')
 		   AND (invite_expires_at IS NULL OR invite_expires_at <= NOW())`,
-		models.StatusExpired, orderID)
+		status, orderID)
 	if err != nil {
 		return nil, false
 	}
@@ -793,6 +1069,10 @@ func (s *Store) ExpireIfSearching(orderID string) (*models.Order, bool) {
 	if !ok {
 		return nil, false
 	}
+	s.loadOrderWorkers(o)
+	// True means "this call closed the search" — the caller reads the resulting
+	// status to decide what to tell the customer, because the two outcomes are
+	// different news and only one of them is bad.
 	return o, true
 }
 
@@ -800,16 +1080,31 @@ func (s *Store) ExpireIfSearching(orderID string) (*models.Order, bool) {
 // down — their dispatch loops died with the process, so nothing else would ever
 // finish them. Returns how many were closed.
 func (s *Store) ExpireStaleSearches() int64 {
-	res, err := s.db.Exec(
+	// Same two outcomes as ExpireIfSearching, in one pass: a search that found
+	// nobody expires, and one that found somebody closes as the (possibly
+	// short-staffed) job it is. Keyed off order_workers rather than
+	// `worker_id`, which only ever names the first of a crew.
+	settled := `AND status IN ('matching','invited')
+		    AND invite_expires_at IS NOT NULL AND invite_expires_at <= NOW()`
+
+	accepted, err := s.db.Exec(
 		`UPDATE orders SET status=$1, invite_expires_at=NULL
-		 WHERE worker_id='' AND status IN ('matching','invited')
-		   AND invite_expires_at IS NOT NULL AND invite_expires_at <= NOW()`,
-		models.StatusExpired)
+		 WHERE EXISTS (SELECT 1 FROM order_workers ow WHERE ow.order_id = orders.id) `+settled,
+		models.StatusAccepted)
 	if err != nil {
 		return 0
 	}
-	n, _ := res.RowsAffected()
-	return n
+	expired, err := s.db.Exec(
+		`UPDATE orders SET status=$1, invite_expires_at=NULL
+		 WHERE NOT EXISTS (SELECT 1 FROM order_workers ow WHERE ow.order_id = orders.id) `+settled,
+		models.StatusExpired)
+	if err != nil {
+		n, _ := accepted.RowsAffected()
+		return n
+	}
+	a, _ := accepted.RowsAffected()
+	e, _ := expired.RowsAffected()
+	return a + e
 }
 
 // Complete marks an order completed. Only the customer who placed the order may

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -169,30 +170,60 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	// Whether the job now has everybody it needs. A one-person order is full on
+	// the first yes, which is what "taken" always meant; a five-person one is
+	// not, and the difference decides both what the customer is told and whether
+	// the other workers keep their card.
+	full := len(order.AcceptedWorkers) >= order.WorkersNeeded
+
 	// Notify the customer that a worker accepted (reveal worker phone).
 	s.publish(order.CustomerID, sse.Event{
 		Type: "order.accepted",
-		Data: map[string]any{"order": order, "worker": wp, "phone": order.WorkerPhone},
+		Data: map[string]any{"order": order, "worker": wp, "phone": wp.Phone, "full": full},
 	})
-	// Everyone else the order was broadcast to lost the race — take the offer
-	// off their screen instead of leaving them ringing at a job that is gone.
-	taken := *order
-	taken.CustomerPhone = ""
+
+	// Everyone else the order was offered to.
+	//
+	// On a full job they lost the race, and the offer comes off their screen
+	// rather than leaving them ringing at work that is gone. On a job still
+	// short of its crew there is no race to lose — four places are open — so
+	// they get the updated order and keep their card. Sending `order.taken`
+	// there would have cleared the invite from every other phone the moment the
+	// first of five accepted, and the job would never have found the other four.
+	rest := *order
+	rest.CustomerPhone = ""
+	// A fresh slice, and by index: ranging by value would have blanked a copy
+	// and posted every crew member's number to every other invited worker.
+	crew := make([]models.OrderWorker, len(order.AcceptedWorkers))
+	copy(crew, order.AcceptedWorkers)
+	for i := range crew {
+		crew[i].Phone = ""
+	}
+	rest.AcceptedWorkers = crew
+	event := "order.status"
+	if full {
+		event = "order.taken"
+	}
 	for _, pid := range order.InvitedWorkerIDs {
-		loserID, ok := s.store.WorkerUserID(pid)
-		if !ok || loserID == u.ID {
+		otherID, ok := s.store.WorkerUserID(pid)
+		if !ok || otherID == u.ID {
 			continue
 		}
-		s.publish(loserID, sse.Event{
-			Type: "order.taken",
-			Data: map[string]any{"order": taken},
+		s.publish(otherID, sse.Event{
+			Type: event,
+			Data: map[string]any{"order": rest},
 		})
 	}
+
 	// And tell the customer for keeps: a push for the phone in their pocket and
-	// a row in their notification list for when they come back to it.
-	s.notify(order.CustomerID, "order.accepted",
-		"Buyurtma qabul qilindi!",
-		wp.FullName+" buyurtmangizni qabul qildi. Telefon raqami: "+order.WorkerPhone,
+	// a row in their notification list for when they come back to it. On a crew
+	// job the count is the news — "3 / 5" is what they are waiting on.
+	body := wp.FullName + " buyurtmangizni qabul qildi. Telefon raqami: " + wp.Phone
+	if order.WorkersNeeded > 1 {
+		body = fmt.Sprintf("%s qabul qildi (%d / %d). Telefon raqami: %s",
+			wp.FullName, len(order.AcceptedWorkers), order.WorkersNeeded, wp.Phone)
+	}
+	s.notify(order.CustomerID, "order.accepted", "Buyurtma qabul qilindi!", body,
 		map[string]any{"order_id": order.ID})
 	// If that job was the last free one, say so now rather than letting the
 	// worker discover it when their phone goes quiet.
@@ -230,12 +261,38 @@ func (s *Server) handleWorkerReject(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
 }
 
-// maskForWorker hides the customer phone unless the order is assigned to the
-// worker (contract: customer phone is revealed only on accept).
+// maskForWorker hides the customer phone unless this worker holds a place on
+// the order (contract: the customer's number is revealed only on accept).
+//
+// The crew is masked too, and separately: a worker who took one of five places
+// is told who else is coming, because they are working alongside them, but a
+// job does not hand out four phone numbers to each of the five people on it.
+// The customer gets the numbers — they are the one who has to ring the people
+// arriving at their house.
 func maskForWorker(o models.Order, workerUserID string) models.Order {
-	if o.WorkerID != workerUserID {
+	mine := false
+	for _, ow := range o.AcceptedWorkers {
+		if ow.WorkerID == workerUserID {
+			mine = true
+			break
+		}
+	}
+	// An order carrying no crew list has not been hydrated (the older read
+	// paths); fall back to the first-accepter column it does carry.
+	if !mine && len(o.AcceptedWorkers) == 0 {
+		mine = o.WorkerID == workerUserID
+	}
+	if !mine {
 		o.CustomerPhone = ""
 	}
+	crew := make([]models.OrderWorker, 0, len(o.AcceptedWorkers))
+	for _, ow := range o.AcceptedWorkers {
+		if ow.WorkerID != workerUserID {
+			ow.Phone = ""
+		}
+		crew = append(crew, ow)
+	}
+	o.AcceptedWorkers = crew
 	return o
 }
 

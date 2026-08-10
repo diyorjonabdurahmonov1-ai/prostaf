@@ -320,6 +320,16 @@ type Order struct {
 	// these people are and chose them, which is a better signal than either.
 	TargetWorkerIDs []string `json:"target_worker_ids,omitempty"`
 
+	// WorkersNeeded is how many people the job takes. One for most jobs; five
+	// for a banquet, four for a lorry. The search keeps running until this many
+	// have accepted or the window closes, so a job that needs five and found
+	// three arrives with three rather than failing.
+	WorkersNeeded int `json:"workers_needed"`
+
+	// AcceptedWorkers is everyone who has taken the job so far. `WorkerID` above
+	// is the first of them, kept for readers that predate this.
+	AcceptedWorkers []OrderWorker `json:"accepted_workers"`
+
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.
 	RejectedWorkerIDs []string `json:"-"`
@@ -327,6 +337,17 @@ type Order struct {
 	// CommissionAmount is the commission collected from the worker on accept.
 	// Internal only (used for analytics/finance), never serialised.
 	CommissionAmount int64 `json:"-"`
+}
+
+// OrderWorker is one worker's place on a job.
+type OrderWorker struct {
+	WorkerID string `json:"worker_id"`
+	Name     string `json:"name,omitempty"`
+	// Phone is masked on the same rule as the order's own numbers: the customer
+	// gets the numbers of the people coming to their home, and a worker on the
+	// job does not get the other four's out of it.
+	Phone     string    `json:"phone,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Rating is a two-way review tied to an order.

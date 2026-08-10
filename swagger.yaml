@@ -879,6 +879,18 @@ paths:
                 lng:
                   type: number
                   format: double
+                workers_needed:
+                  type: integer
+                  minimum: 1
+                  maximum: 20
+                  default: 1
+                  description: >
+                    How many people the job takes. One order with five places is
+                    how a banquet needing five helpers is placed: the search stays
+                    open until five workers have accepted, each holding a place
+                    rather than racing the others for the only one. The price is
+                    per worker. Clamped to the number of target_worker_ids when
+                    those are given.
                 target_worker_ids:
                   type: array
                   description: >
@@ -2366,9 +2378,34 @@ components:
             ordinary broadcast.
           items:
             type: string
+        workers_needed:
+          type: integer
+          description: How many people the job takes. 1 for an ordinary order.
+        accepted_workers:
+          type: array
+          description: >
+            Everyone who has taken the job so far; worker_id above is the first
+            of them. Phones follow the same rule as the order's own: the customer
+            sees them all, and a worker sees only their own.
+          items:
+            $ref: "#/components/schemas/OrderWorker"
         invite_expires_at:
           type: string
           format: date-time
+        created_at:
+          type: string
+          format: date-time
+
+    OrderWorker:
+      type: object
+      description: One worker's place on a job.
+      properties:
+        worker_id:
+          type: string
+        name:
+          type: string
+        phone:
+          type: string
         created_at:
           type: string
           format: date-time
