@@ -40,20 +40,28 @@ go vet ./...     # vets clean
 | `ESKIZ_SENDER`       | `4546`                          | Sender id; a custom name needs Eskiz approval |
 | `COMMISSION_PERCENT` | `10`                            | Commission % deducted from worker on accept  |
 | `MIN_BALANCE`        | `10000`                         | Default wallet minimum balance (UZS)         |
+| `SEED_DEMO`          | `false`                         | Create test workers/firms (see below)        |
 
-## Seeded data (in-memory; resets on restart)
+## Seeded data
+
+Seeded on first run into an empty database, then persisted like anything else.
 
 Categories (7): `banquet_helper`, `gardening`, `mover_coal`, `loader`,
 `post_repair_clean`, `master_helper`, `room_clean` (uz/ru/en names + emoji icon).
 
-Demo accounts — log in with SMS OTP; in dev the code is returned as `dev_code`:
+The admin account from `ADMIN_PHONE` (default `+998900000000`).
 
-| Phone           | Roles            | Notes                                                                             |
-| --------------- | ---------------- | --------------------------------------------------------------------------------- |
-| `+998900000000` | customer, admin  | Admin account                                                                     |
-| `+998901111111` | customer, worker | "Ali Valiyev", online, Tashkent, room_clean+loader, wallet 100000                 |
-| `+998902222222` | customer, worker | "Sardor Karimov", online, Tashkent, room_clean+gardening, wallet 100000           |
-| `+998903333333` | customer, worker | "Bekzod", online, **Samarkand** (outside 15 km) — used to prove the radius filter |
+### Demo providers (`SEED_DEMO=true`)
+
+With the flag set, `internal/store/demo.go` puts 8 workers (`+99890111000X`) and
+5 firms (`+99890222000X`) on the platform, all online, scattered 2–12 km around
+the centre of Tashkent so the radius filter has something to filter. Every one of
+them signs in with the password `demo1234`.
+
+The seeder is idempotent — a phone that already carries a profile is skipped — so
+the flag can stay set across restarts. It is off by default and independent of
+`DEV_MODE`, which defaults on: inventing bookable providers on a real database is
+not something a default should do.
 
 Any new phone auto-creates a `customer` on OTP verify.
 

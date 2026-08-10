@@ -85,6 +85,11 @@ func New(cfg config.Config, db *sql.DB) *Store {
 	// After the settings, because the starting tariffs are derived from the
 	// monthly price the office has actually configured.
 	s.seedSubscriptionPlans()
+	// Last, because the fixtures need the categories, the settings and the
+	// tariffs that the three calls above put in place.
+	if cfg.SeedDemo {
+		s.seedDemoProviders()
+	}
 	return s
 }
 

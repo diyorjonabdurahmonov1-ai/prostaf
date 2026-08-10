@@ -47,6 +47,12 @@ type Config struct {
 	AdminPassword string
 	AdminPhone    string
 
+	// SeedDemo fills an empty platform with test workers and firms — see
+	// internal/store/demo.go. Off by default, and deliberately not tied to
+	// DevMode: that one defaults on, and inventing bookable providers on a real
+	// database is not something a default should do.
+	SeedDemo bool
+
 	// Atmos payment gateway. With ATMOS_BASE_URL empty the server behaves as it
 	// did before there was a gateway: DEV_MODE credits a top-up straight away,
 	// and outside DEV_MODE a top-up is refused rather than silently pretending.
@@ -127,6 +133,8 @@ func Load() Config {
 		AdminEmail:    env("ADMIN_EMAIL", "admin@prostaff.uz"),
 		AdminPassword: env("ADMIN_PASSWORD", "admin123"),
 		AdminPhone:    env("ADMIN_PHONE", "998900000000"),
+
+		SeedDemo: envBool("SEED_DEMO", false),
 
 		AtmosBaseURL:        env("ATMOS_BASE_URL", ""),
 		AtmosCheckoutURL:    env("ATMOS_CHECKOUT_URL", "https://checkout.pays.uz/invoice/get"),

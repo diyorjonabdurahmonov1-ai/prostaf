@@ -376,6 +376,16 @@ func (s *Store) ListCompanyOrders(companyUserID string) []models.Order {
 }
 
 // ListWorkerOrders returns orders a worker is invited to or assigned.
+//
+// An invitation is not a claim. A broadcast order rings every nearby worker at
+// once, and the first one to answer takes it — so the row keeps naming all of
+// them in invited_worker_ids long after somebody else has the job. Returning it
+// to the losers put a job they will never do into their feed, where the app
+// filed it under "accepted" because that is what its status now says: every
+// worker who had been rung was shown an active job belonging to one of them.
+//
+// Whoever holds the order sees it; everybody else it was merely offered to
+// stops seeing it the moment it is taken.
 func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.Order {
 	wp, ok := s.GetWorkerByUser(workerUserID)
 	if !ok {
@@ -396,7 +406,15 @@ func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.
 		if !since.IsZero() && !o.CreatedAt.After(since) {
 			continue
 		}
-		if o.WorkerID == workerUserID || containsStr(o.InvitedWorkerIDs, wp.ID) {
+		if o.WorkerID == workerUserID {
+			out = append(out, *o)
+			continue
+		}
+		// Invited, but somebody else answered first — the offer is over.
+		if o.WorkerID != "" {
+			continue
+		}
+		if containsStr(o.InvitedWorkerIDs, wp.ID) {
 			out = append(out, *o)
 		}
 	}
