@@ -320,6 +320,12 @@ type Order struct {
 	// these people are and chose them, which is a better signal than either.
 	TargetWorkerIDs []string `json:"target_worker_ids,omitempty"`
 
+	// BatchID groups the orders a customer placed as one request — asking for
+	// five helpers creates five orders that share it. Dispatch uses it to offer
+	// each worker only one of them at a time, so a worker sees one card rather
+	// than five. Empty on an ordinary single order.
+	BatchID string `json:"batch_id,omitempty"`
+
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.
 	RejectedWorkerIDs []string `json:"-"`

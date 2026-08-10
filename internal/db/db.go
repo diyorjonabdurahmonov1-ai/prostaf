@@ -434,6 +434,21 @@ func migrate(db *sql.DB) {
 		// profiles and to nobody else, however many other workers would match.
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS target_worker_ids TEXT NOT NULL DEFAULT '[]'`,
 
+		// The orders that were placed together as one request.
+		//
+		// "I need five helpers" is five orders — that is what keeps each worker's
+		// commission tied to a job they actually got, instead of leaving somebody
+		// charged for a half-staffed evening. But five orders broadcast
+		// independently rang every nearby worker five times: a worker looking for
+		// one job saw five cards and got five pushes, and four of them were for
+		// work they could not take once they had answered the first.
+		//
+		// Sharing an id is what lets dispatch treat them as one request and offer
+		// each worker only one of them at a time. Empty for an ordinary single
+		// order, which is every order written before this.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_orders_batch ON orders(batch_id) WHERE batch_id <> ''`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

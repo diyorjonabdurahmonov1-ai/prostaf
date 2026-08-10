@@ -879,6 +879,14 @@ paths:
                 lng:
                   type: number
                   format: double
+                batch_id:
+                  type: string
+                  description: >
+                    Groups the orders placed as one request — asking for five
+                    workers creates five orders sharing one id. Dispatch offers
+                    each worker only one order out of a batch, so a worker sees
+                    one card rather than five. Minted by the client; the server
+                    only needs the orders to agree on it. Omit for a single order.
                 target_worker_ids:
                   type: array
                   description: >
@@ -2366,6 +2374,11 @@ components:
             ordinary broadcast.
           items:
             type: string
+        batch_id:
+          type: string
+          description: >
+            Set when this order was placed as part of one multi-worker request.
+            Absent on an ordinary single order.
         invite_expires_at:
           type: string
           format: date-time

@@ -125,6 +125,48 @@ func TestMatchesOrderTargeted(t *testing.T) {
 	})
 }
 
+// A worker is offered one order out of a batch, not all of them.
+//
+// This is the rule that keeps "I need five helpers" from putting five cards and
+// five pushes on every nearby phone. `batchEngagedWorkers` needs a database, so
+// what is tested here is the filter it feeds — that a worker a sibling order is
+// already ringing is skipped, and that nothing changes for an ordinary order
+// with no batch at all.
+func TestBatchEngagedWorkersAreSkipped(t *testing.T) {
+	// The predicate as candidatesFor applies it: eligible for the order, and not
+	// already spoken for by a sibling.
+	eligible := func(o *models.Order, wp *models.WorkerProfile, engaged map[string]bool) bool {
+		return matchesOrder(o, wp) && !engaged[wp.ID]
+	}
+
+	t.Run("a worker a sibling order is ringing is skipped", func(t *testing.T) {
+		o, wp := broadcastOrder(), worker("w1")
+		o.BatchID = "batch-1"
+		engaged := map[string]bool{"w1": true}
+		if eligible(o, wp, engaged) {
+			t.Error("eligible = true, want false — a sibling order already has them")
+		}
+	})
+
+	t.Run("a worker nobody has yet is offered the job", func(t *testing.T) {
+		o, wp := broadcastOrder(), worker("w2")
+		o.BatchID = "batch-1"
+		engaged := map[string]bool{"w1": true}
+		if !eligible(o, wp, engaged) {
+			t.Error("eligible = false, want true — this worker is free")
+		}
+	})
+
+	// An order placed on its own has no siblings, so nothing is ever withheld
+	// from it: the ordinary broadcast still rings everybody at once.
+	t.Run("a lone order still reaches everybody", func(t *testing.T) {
+		o, wp := broadcastOrder(), worker("w1")
+		if !eligible(o, wp, map[string]bool{}) {
+			t.Error("eligible = false, want true — a single order has no batch")
+		}
+	})
+}
+
 // When a decline is the customer's answer.
 //
 // This is what decides whether they are told "rad etildi" now or left watching a

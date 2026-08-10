@@ -36,6 +36,8 @@ type OrderInput struct {
 	// TargetWorkerIDs narrows the search to workers the customer picked by hand.
 	// Empty is the ordinary broadcast — see models.Order.
 	TargetWorkerIDs []string
+	// BatchID groups orders placed as one request — see models.Order.
+	BatchID string
 }
 
 // A worker or company is "busy" while one of their orders is accepted or
@@ -102,7 +104,8 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
-		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs)
+		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs,
+		&o.BatchID)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +124,7 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	return &o, nil
 }
 
-const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids"
+const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids, batch_id"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -178,14 +181,15 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		InvitedWorkerIDs:  []string{},
 		RejectedWorkerIDs: []string{},
 		TargetWorkerIDs:   targets,
+		BatchID:           in.BatchID,
 		InviteExpiresAt:   &expires,
 		CreatedAt:         time.Now(),
 	}
 	normalizeOrderPhotos(o)
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
 		o.ID, o.CustomerID, "", "", o.CategoryID, o.Gender, o.Description, o.ImageURL,
 		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", expires, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
-		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs)); err != nil {
+		marshalJSON(o.Images), marshalJSON(o.TargetWorkerIDs), o.BatchID); err != nil {
 		log.Printf("store: order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -257,10 +261,10 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 		CreatedAt:         time.Now(),
 	}
 	normalizeOrderPhotos(o)
-	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)",
+	if _, err := s.db.Exec("INSERT INTO orders ("+orderCols+") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)",
 		o.ID, o.CustomerID, "", o.CompanyID, "", o.Gender, o.Description, o.ImageURL,
 		o.CustomerPhone, "", o.Lat, o.Lng, o.Status, "[]", nil, 0, o.CreatedAt, o.CustomerName, o.Price, "[]",
-		marshalJSON(o.Images), "[]"); err != nil {
+		marshalJSON(o.Images), "[]", ""); err != nil {
 		log.Printf("store: company order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
@@ -502,10 +506,56 @@ func matchesOrder(o *models.Order, wp *models.WorkerProfile) bool {
 	return geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng) <= matchRadiusKm
 }
 
+/**
+ * Workers this order's siblings have already got on the phone.
+ *
+ * "I need five helpers" is five orders, and each of them broadcasts. Left alone
+ * that means every nearby worker is rung five times for what is, to them, one
+ * decision: five cards, five pushes, and four of them dead the moment they
+ * answer the first. The point of five orders is five *workers*, not five
+ * requests each.
+ *
+ * So an order skips anybody a sibling is currently waiting on. Only siblings
+ * still searching hold their workers — once one is accepted, expired or
+ * declined, the people it was ringing are released and the next wave of the
+ * remaining orders picks them up. That is what makes this converge rather than
+ * deadlock when there are fewer workers around than the customer asked for:
+ * with two workers and five orders, two get answered and the other three run
+ * their window out, which is the honest outcome.
+ */
+func (s *Store) batchEngagedWorkers(o *models.Order) map[string]bool {
+	engaged := map[string]bool{}
+	if o.BatchID == "" {
+		return engaged
+	}
+	rows, err := s.db.Query(
+		`SELECT invited_worker_ids FROM orders
+		 WHERE batch_id=$1 AND id<>$2 AND status IN ('pending','matching','invited')`,
+		o.BatchID, o.ID)
+	if err != nil {
+		return engaged
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var invited string
+		if rows.Scan(&invited) != nil {
+			continue
+		}
+		for _, id := range unmarshalStrings(invited) {
+			engaged[id] = true
+		}
+	}
+	return engaged
+}
+
 // candidatesFor returns every worker who could take this order right now:
-// online, not banned, eligible under matchesOrder, not already on a job and able
-// to afford the commission — nearest first.
+// online, not banned, eligible under matchesOrder, not already on a job, not
+// already ringing for a sibling order, and able to afford the commission —
+// nearest first.
 func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
+	// One read for the whole sweep rather than a query per candidate.
+	engaged := s.batchEngagedWorkers(o)
+
 	rows, err := s.db.Query("SELECT " + workerCols + " FROM workers WHERE online=TRUE AND banned=FALSE")
 	if err != nil {
 		return nil
@@ -518,6 +568,10 @@ func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 			continue
 		}
 		if !matchesOrder(o, wp) {
+			continue
+		}
+		// A sibling order of the same request is already waiting on them.
+		if engaged[wp.ID] {
 			continue
 		}
 		// Already on a job — not available until it is finished.

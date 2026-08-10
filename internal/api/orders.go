@@ -28,6 +28,10 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		// TargetWorkerIDs are worker profile ids the customer picked from the
 		// nearby list. Absent or empty is the ordinary broadcast.
 		TargetWorkerIDs []string `json:"target_worker_ids"`
+		// BatchID groups the orders placed as one request ("I need five
+		// helpers" is five orders sharing it). The client mints it; the server
+		// only needs the orders to agree on it. Empty for a single order.
+		BatchID string `json:"batch_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -46,6 +50,7 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Lat:             body.Lat,
 		Lng:             body.Lng,
 		TargetWorkerIDs: body.TargetWorkerIDs,
+		BatchID:         body.BatchID,
 	})
 	if err != nil {
 		writeStoreError(w, err)
