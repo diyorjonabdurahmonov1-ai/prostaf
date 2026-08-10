@@ -1,7 +1,6 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 
@@ -29,9 +28,6 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		// TargetWorkerIDs are worker profile ids the customer picked from the
 		// nearby list. Absent or empty is the ordinary broadcast.
 		TargetWorkerIDs []string `json:"target_worker_ids"`
-		// WorkersNeeded is how many people the job takes. Absent or 0 means one,
-		// which is what every order meant before this field existed.
-		WorkersNeeded int `json:"workers_needed"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -50,7 +46,6 @@ func (s *Server) handleCreateOrder(w http.ResponseWriter, r *http.Request) {
 		Lat:             body.Lat,
 		Lng:             body.Lng,
 		TargetWorkerIDs: body.TargetWorkerIDs,
-		WorkersNeeded:   body.WorkersNeeded,
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -128,13 +123,7 @@ func (s *Server) orderFor(w http.ResponseWriter, r *http.Request) (*models.Order
 			isCompanyOwner = true
 		}
 	}
-	// A place on the job makes you a participant, not merely someone it was
-	// offered to. `worker_id` names only the first of a crew, so testing it
-	// alone left the other four workers on a five-person job reading their own
-	// job as an invitation — with the customer's number hidden, which is the one
-	// thing accepting is supposed to hand them.
-	if order.CustomerID == u.ID || order.WorkerID == u.ID || u.HasRole(models.RoleAdmin) ||
-		s.store.WorkerOnOrder(order.ID, u.ID) {
+	if order.CustomerID == u.ID || order.WorkerID == u.ID || u.HasRole(models.RoleAdmin) {
 		return order, partyParticipant, true
 	}
 	// A firm owns the row from the moment the customer chose it, which is not
@@ -231,36 +220,16 @@ func (s *Server) dispatch(orderID string, fallback *models.Order) *models.Order 
 // coming. "Nobody took it" is news, and it is the one outcome the customer has
 // to act on.
 func (s *Server) expireIfDue(orderID string) {
-	order, changed := s.store.ExpireIfSearching(orderID)
-	if !changed {
-		return
-	}
-
-	// A job that needed five and found three is short-staffed, not failed. Three
-	// people accepted and are on their way, so the customer is told what they
-	// got — telling them "nobody took it" would be untrue, and the retry it
-	// offers would re-open a job three workers are already committed to.
-	if order.Status != models.StatusExpired {
-		s.publish(order.CustomerID, sse.Event{
-			Type: "order.status",
-			Data: map[string]any{"order": order},
+	if expired, changed := s.store.ExpireIfSearching(orderID); changed {
+		s.publish(expired.CustomerID, sse.Event{
+			Type: "order.expired",
+			Data: map[string]any{"order": expired},
 		})
-		s.notify(order.CustomerID, "order.status",
-			"Buyurtmangiz qabul qilindi",
-			fmt.Sprintf("%d ta ishchidan %d tasi buyurtmangizni qabul qildi.",
-				order.WorkersNeeded, len(order.AcceptedWorkers)),
-			map[string]any{"order_id": order.ID})
-		return
+		s.notify(expired.CustomerID, "order.expired",
+			"Buyurtmangizni hech kim qabul qilmadi",
+			"Yaqin atrofda bo'sh ishchi topilmadi. Buyurtmani qaytadan yuboring yoki narxni oshiring.",
+			map[string]any{"order_id": expired.ID})
 	}
-
-	s.publish(order.CustomerID, sse.Event{
-		Type: "order.expired",
-		Data: map[string]any{"order": order},
-	})
-	s.notify(order.CustomerID, "order.expired",
-		"Buyurtmangizni hech kim qabul qilmadi",
-		"Yaqin atrofda bo'sh ishchi topilmadi. Buyurtmani qaytadan yuboring yoki narxni oshiring.",
-		map[string]any{"order_id": order.ID})
 }
 
 // dispatchLoop keeps re-broadcasting until the order is taken or the window

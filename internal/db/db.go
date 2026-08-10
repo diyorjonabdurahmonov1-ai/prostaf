@@ -434,46 +434,6 @@ func migrate(db *sql.DB) {
 		// profiles and to nobody else, however many other workers would match.
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS target_worker_ids TEXT NOT NULL DEFAULT '[]'`,
 
-		// How many people the job needs.
-		//
-		// One order, one worker was baked in from the start — `worker_id` is a
-		// column, so accepting *was* assignment and the first yes ended the
-		// search. That is right for a leaking tap and wrong for most of what this
-		// platform is actually used for: a banquet needs five helpers, a lorry
-		// needs four loaders, and a customer was being asked to fill the same
-		// form five times and then manage five unrelated orders for one evening.
-		//
-		// Defaults to 1, so every order written before this means exactly what it
-		// meant before.
-		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS workers_needed INTEGER NOT NULL DEFAULT 1`,
-
-		// Who has accepted, one row per worker.
-		//
-		// `orders.worker_id` stays and keeps holding the *first* accepter: the
-		// admin screens, the rating flow and every app built before this read
-		// that column, and an order that shows them nobody is worse than one that
-		// shows them one of the five. This table is the truth about the rest.
-		//
-		// The primary key is what stops a worker accepting the same job twice —
-		// including two taps that arrive together.
-		`CREATE TABLE IF NOT EXISTS order_workers (
-			order_id    TEXT NOT NULL,
-			worker_id   TEXT NOT NULL,
-			worker_name TEXT NOT NULL DEFAULT '',
-			phone       TEXT NOT NULL DEFAULT '',
-			commission  BIGINT NOT NULL DEFAULT 0,
-			created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-			PRIMARY KEY (order_id, worker_id)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_order_workers_worker ON order_workers(worker_id)`,
-
-		// Every job already accepted predates the table and would otherwise look
-		// unaccepted to everything that reads it. Idempotent on the primary key.
-		`INSERT INTO order_workers (order_id, worker_id, phone, commission, created_at)
-		 SELECT id, worker_id, worker_phone, commission_amount, created_at
-		 FROM orders WHERE worker_id <> ''
-		 ON CONFLICT DO NOTHING`,
-
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,
