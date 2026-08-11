@@ -237,23 +237,6 @@ func migrate(db *sql.DB) {
 		// replaced by the next request anyway.
 		`ALTER TABLE otps ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`,
 
-		// Accounts the office created before the role was assigned at creation
-		// time carry a profile but no matching role, so the admin list files them
-		// under "customer". Re-derive the role from the profile that exists.
-		`UPDATE users u SET roles = (
-			SELECT jsonb_agg(DISTINCT r)::text
-			FROM jsonb_array_elements(u.roles::jsonb || '["worker"]'::jsonb) AS r
-		)
-		WHERE EXISTS (SELECT 1 FROM workers w WHERE w.user_id = u.id)
-		  AND NOT (u.roles::jsonb @> '["worker"]'::jsonb)`,
-
-		`UPDATE users u SET roles = (
-			SELECT jsonb_agg(DISTINCT r)::text
-			FROM jsonb_array_elements(u.roles::jsonb || '["company"]'::jsonb) AS r
-		)
-		WHERE EXISTS (SELECT 1 FROM companies c WHERE c.user_id = u.id)
-		  AND NOT (u.roles::jsonb @> '["company"]'::jsonb)`,
-
 		// A rating belongs to one reputation, not to an account.
 		//
 		// One person can be a worker, a firm and a customer at once. Without this
