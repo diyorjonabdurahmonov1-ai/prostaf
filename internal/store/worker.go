@@ -337,8 +337,10 @@ type CompanyInput struct {
 	Images      []string
 	Price       int64
 	CategoryIDs []string
-	Lat         float64
-	Lng         float64
+	// Services is what the firm does, written out. Optional.
+	Services string
+	Lat      float64
+	Lng      float64
 	// INN is required, for the same reason a worker's passport is: it is the firm
 	// on paper, and the key its free trial jobs are counted under.
 	INN string
@@ -359,7 +361,7 @@ func (s *Store) scanCompany(row interface{ Scan(dest ...any) error }) (*models.C
 	err := row.Scan(&cp.ID, &cp.UserID, &cp.Name, &cp.Phone, &cp.Description, &images,
 		&cp.Online, &cp.Banned, &cp.Rating, &cp.RatingsCount, &cp.CreatedAt, &cp.Price,
 		&cp.AvatarURL, &cp.Address, &cp.WorkingHours, &cp.EmployeesCount, &cp.ExperienceYears,
-		&cp.Email, &cp.Website, &categoryIDs, &cp.Lat, &cp.Lng,
+		&cp.Email, &cp.Website, &categoryIDs, &cp.Services, &cp.Lat, &cp.Lng,
 		&cp.INN, &cp.FreeOrdersUsed, &until)
 	if err != nil {
 		return nil, err
@@ -381,7 +383,7 @@ func (s *Store) scanCompany(row interface{ Scan(dest ...any) error }) (*models.C
 
 const companyCols = `id, user_id, name, phone, description, images, online, banned, rating,
 	ratings_count, created_at, price, avatar_url, address, working_hours, employees_count,
-	experience_years, email, website, category_ids, lat, lng, inn,
+	experience_years, email, website, category_ids, services, lat, lng, inn,
 	COALESCE((SELECT ft.used FROM free_trials ft
 		WHERE companies.inn <> '' AND ft.key = 'company:' || companies.inn), 0) AS free_orders_used,
 	subscription_until`
@@ -424,6 +426,7 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 		Images:          in.Images,
 		Price:           in.Price,
 		CategoryIDs:     in.CategoryIDs,
+		Services:        in.Services,
 		Lat:             in.Lat,
 		Lng:             in.Lng,
 		Online:          false,
@@ -449,12 +452,12 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 	// two operators typing in the same firm at once both get past the check above.
 	if _, err := s.db.Exec(`INSERT INTO companies (id, user_id, name, phone, description, images, created_at, price,
 		avatar_url, address, working_hours, employees_count, experience_years, email, website,
-		category_ids, lat, lng, inn)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
+		category_ids, services, lat, lng, inn)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
 		cp.ID, cp.UserID, cp.Name, cp.Phone, cp.Description,
 		marshalJSON(cp.Images), cp.CreatedAt, cp.Price,
 		cp.AvatarURL, cp.Address, cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears,
-		cp.Email, cp.Website, marshalJSON(cp.CategoryIDs), cp.Lat, cp.Lng, cp.INN); err != nil {
+		cp.Email, cp.Website, marshalJSON(cp.CategoryIDs), cp.Services, cp.Lat, cp.Lng, cp.INN); err != nil {
 		return nil, ErrDuplicateINN
 	}
 	s.addRoleInternal(userID, models.RoleCompany)
@@ -467,6 +470,7 @@ type CompanyPatch struct {
 	Images      *[]string
 	Price       *int64
 	CategoryIDs *[]string
+	Services    *string
 	Lat         *float64
 	Lng         *float64
 	// Phone and INN are admin-only: the company's contact number and its tax
@@ -501,6 +505,11 @@ func (p CompanyPatch) apply(cp *models.CompanyProfile) {
 	}
 	if p.CategoryIDs != nil {
 		cp.CategoryIDs = *p.CategoryIDs
+	}
+	// Blank is a real value here, not a missing one: clearing the line is how a
+	// firm takes it off its page.
+	if p.Services != nil {
+		cp.Services = *p.Services
 	}
 	if p.Lat != nil {
 		cp.Lat = *p.Lat
@@ -552,17 +561,17 @@ func (s *Store) validCategories(ids *[]string) bool {
 }
 
 // companyUpdateSQL writes every editable column except phone, which only the
-// admin path sets. Callers append their own WHERE clause starting at $15.
+// admin path sets. Callers append their own WHERE clause starting at $16.
 const companyUpdateSQL = `UPDATE companies SET name=$1, description=$2, images=$3, price=$4,
 	avatar_url=$5, address=$6, working_hours=$7, employees_count=$8, experience_years=$9,
-	email=$10, website=$11, category_ids=$12, lat=$13, lng=$14`
+	email=$10, website=$11, category_ids=$12, services=$13, lat=$14, lng=$15`
 
-// companyUpdateArgs is the $1..$14 tail every writer of companyUpdateSQL passes.
+// companyUpdateArgs is the $1..$15 tail every writer of companyUpdateSQL passes.
 func companyUpdateArgs(cp *models.CompanyProfile) []any {
 	return []any{
 		cp.Name, cp.Description, marshalJSON(cp.Images), cp.Price, cp.AvatarURL, cp.Address,
 		cp.WorkingHours, cp.EmployeesCount, cp.ExperienceYears, cp.Email, cp.Website,
-		marshalJSON(cp.CategoryIDs), cp.Lat, cp.Lng,
+		marshalJSON(cp.CategoryIDs), cp.Services, cp.Lat, cp.Lng,
 	}
 }
 
@@ -575,7 +584,7 @@ func (s *Store) UpdateCompanyProfile(userID string, p CompanyPatch) (*models.Com
 		return nil, ErrBadRequest
 	}
 	p.apply(cp)
-	s.db.Exec(companyUpdateSQL+" WHERE user_id=$15", append(companyUpdateArgs(cp), userID)...)
+	s.db.Exec(companyUpdateSQL+" WHERE user_id=$16", append(companyUpdateArgs(cp), userID)...)
 	return cp, nil
 }
 
@@ -736,7 +745,7 @@ func (s *Store) AdminUpdateCompany(companyID string, p CompanyPatch) (*models.Co
 	if p.Phone != nil {
 		cp.Phone = normalizePhone(*p.Phone)
 	}
-	s.db.Exec(companyUpdateSQL+", phone=$15 WHERE id=$16",
+	s.db.Exec(companyUpdateSQL+", phone=$16 WHERE id=$17",
 		append(companyUpdateArgs(cp), cp.Phone, cp.ID)...)
 	return cp, nil
 }

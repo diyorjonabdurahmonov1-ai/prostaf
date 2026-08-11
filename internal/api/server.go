@@ -246,6 +246,13 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET "+p+"/admin/analytics/orders", s.admin(s.handleAdminAnalytics))
 	mux.HandleFunc("GET "+p+"/admin/finance", s.admin(s.handleAdminFinance))
 	// The tariff cards a firm chooses between — length and price, nothing else.
+	// The service list is the office's to edit — every order and every provider
+	// is filed under one of these rows.
+	mux.HandleFunc("GET "+p+"/admin/categories", s.admin(s.handleAdminCategories))
+	mux.HandleFunc("POST "+p+"/admin/categories", s.admin(s.handleAdminCreateCategory))
+	mux.HandleFunc("PATCH "+p+"/admin/categories/{id}", s.admin(s.handleAdminUpdateCategory))
+	mux.HandleFunc("DELETE "+p+"/admin/categories/{id}", s.admin(s.handleAdminDeleteCategory))
+
 	mux.HandleFunc("GET "+p+"/admin/subscription-plans", s.admin(s.handleAdminPlans))
 	mux.HandleFunc("POST "+p+"/admin/subscription-plans", s.admin(s.handleAdminCreatePlan))
 	mux.HandleFunc("PATCH "+p+"/admin/subscription-plans/{id}", s.admin(s.handleAdminUpdatePlan))

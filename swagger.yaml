@@ -505,6 +505,9 @@ paths:
     get:
       tags: [Categories]
       summary: List all categories
+      description: |
+        Includes retired categories (`active: false`) so an order filed under one
+        can still be given a name. Pickers filter on `active`.
       responses:
         "200":
           description: Category list
@@ -514,6 +517,112 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Category"
+
+  /admin/categories:
+    get:
+      tags: [Admin]
+      summary: List categories with usage counts
+      responses:
+        "200":
+          description: Every category, retired ones included
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Category"
+    post:
+      tags: [Admin]
+      summary: Add a category
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name_uz]
+              properties:
+                name_uz:
+                  type: string
+                name_ru:
+                  type: string
+                  description: Falls back to name_uz when blank
+                name_en:
+                  type: string
+                  description: Falls back to name_uz when blank
+                icon:
+                  type: string
+                  description: Legacy and unread — the apps derive the glyph from `key`
+                key:
+                  type: string
+                  description: Derived from name_uz when omitted
+                active:
+                  type: boolean
+                sort:
+                  type: integer
+                  description: Appended to the end of the list when omitted
+      responses:
+        "201":
+          description: Category created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+        "409":
+          description: duplicate_category — that key is already taken
+
+  /admin/categories/{id}:
+    patch:
+      tags: [Admin]
+      summary: Rename, re-icon, reorder or retire a category
+      description: |
+        Safe at any time: the id is what orders and providers point at, so a
+        rename simply starts showing up wherever it was already used. Set
+        `active: false` to retire one instead of deleting it.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name_uz:
+                  type: string
+                name_ru:
+                  type: string
+                name_en:
+                  type: string
+                icon:
+                  type: string
+                key:
+                  type: string
+                active:
+                  type: boolean
+                sort:
+                  type: integer
+      responses:
+        "200":
+          description: Updated category
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Category"
+    delete:
+      tags: [Admin]
+      summary: Delete a category nothing points at
+      description: |
+        Only for a category with no orders and no providers — a typo made two
+        minutes ago. Anything in use is refused with `category_in_use`; retire it
+        with `active: false` instead, so the records that reference it keep a
+        name to show.
+      parameters:
+        - $ref: "#/components/parameters/PathId"
+      responses:
+        "200":
+          description: Deleted
+        "409":
+          description: category_in_use — retire it instead
 
   # ──────────────────────────── Notifications ───────────────────
   /notifications:
@@ -747,6 +856,9 @@ paths:
                   type: string
                 description:
                   type: string
+                services:
+                  type: string
+                  description: Free text; send "" to clear the line
                 images:
                   type: array
                   items:
@@ -2075,6 +2187,7 @@ components:
           type: string
         key:
           type: string
+          description: Stable slug, derived from name_uz when not supplied
         name_uz:
           type: string
         name_ru:
@@ -2083,6 +2196,25 @@ components:
           type: string
         icon:
           type: string
+          description: |
+            Legacy and unread. The apps pick their own glyph from `key` — see
+            mobile/src/lib/category-icon.ts — so the admin form asks for a name
+            and nothing else.
+        active:
+          type: boolean
+          description: |
+            Whether the category takes new work. Retired rows are still returned
+            by GET /categories — an order filed under one still needs a name —
+            so pickers must filter on this flag.
+        sort:
+          type: integer
+          description: Display order; ties fall back to name_uz
+        orders_count:
+          type: integer
+          description: Admin list only — orders filed under this category
+        providers_count:
+          type: integer
+          description: Admin list only — workers and firms that claim it
 
     WorkerProfile:
       type: object
@@ -2180,9 +2312,16 @@ components:
             type: string
         category_ids:
           type: array
-          description: Services the firm offers; how a customer browsing by category finds it
+          description: |
+            Services the firm offers, as ids from the shared category list.
+            Legacy: the firm forms no longer write it — `services` replaced it.
           items:
             type: string
+        services:
+          type: string
+          description: |
+            What the firm does, in its own words ("Ta'mirlash, santexnika").
+            Optional — a firm is bookable without it.
         lat:
           type: number
           format: double

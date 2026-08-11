@@ -204,6 +204,21 @@ func migrate(db *sql.DB) {
 		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION NOT NULL DEFAULT 0`,
 		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS lng DOUBLE PRECISION NOT NULL DEFAULT 0`,
 
+		// The category list is the office's to edit now, not a fixture compiled
+		// into the binary. Retiring one is a flag rather than a delete: an order
+		// taken last year still points at its category and still has to be able
+		// to show a name. Existing rows are active and unsorted, which is the
+		// list exactly as it was.
+		`ALTER TABLE categories ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE`,
+		`ALTER TABLE categories ADD COLUMN IF NOT EXISTS sort INTEGER NOT NULL DEFAULT 0`,
+
+		// …and then in its own words instead. Picking from the fixed category list
+		// is gone from the firm forms: it never covered what a firm actually
+		// sells, and it was the one field that could make an otherwise complete
+		// profile refuse to save. category_ids stays on the row so the firms that
+		// filled it in before keep their line on screen.
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS services TEXT NOT NULL DEFAULT ''`,
+
 		// Uploaded images live in the database, not on disk: the server runs on a
 		// host with an ephemeral filesystem, and a photo that disappears on the
 		// next deploy is worse than no photo at all. Rows are small (a picker

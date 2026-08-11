@@ -19,6 +19,7 @@ func (s *Server) handlePatchCompanyProfile(w http.ResponseWriter, r *http.Reques
 		Images      *[]string `json:"images"`
 		Price       *int64    `json:"price"`
 		CategoryIDs *[]string `json:"category_ids"`
+		Services    *string   `json:"services"`
 		Lat         *float64  `json:"lat"`
 		Lng         *float64  `json:"lng"`
 
@@ -39,6 +40,7 @@ func (s *Server) handlePatchCompanyProfile(w http.ResponseWriter, r *http.Reques
 		Images:          body.Images,
 		Price:           body.Price,
 		CategoryIDs:     body.CategoryIDs,
+		Services:        body.Services,
 		Lat:             body.Lat,
 		Lng:             body.Lng,
 		AvatarURL:       body.AvatarURL,

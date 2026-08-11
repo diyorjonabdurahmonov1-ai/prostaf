@@ -67,6 +67,18 @@ type Category struct {
 	NameRu string `json:"name_ru"`
 	NameEn string `json:"name_en"`
 	Icon   string `json:"icon"`
+	// Active is whether the category still takes new work. A retired one is kept
+	// off every picker but stays readable, because the orders and the workers
+	// that already point at it need a name to show.
+	Active bool `json:"active"`
+	// Sort orders the grid the customer opens the app to. Ties fall back to the
+	// Uzbek name, so an admin who never touches this still gets a stable list.
+	Sort int `json:"sort"`
+	// OrdersCount and ProvidersCount are what a category is holding: filled only
+	// on the admin list, because they are what decides whether it can be deleted
+	// or has to be retired instead.
+	OrdersCount    int `json:"orders_count,omitempty"`
+	ProvidersCount int `json:"providers_count,omitempty"`
 }
 
 // WorkerProfile is a worker's public + operational data.
@@ -159,10 +171,16 @@ type CompanyProfile struct {
 	// Price is the company's service fee in so'm. Required — customers order at
 	// this price, they do not name their own.
 	Price int64 `json:"price"`
-	// CategoryIDs is what the firm actually does. A company is never broadcast
-	// to the way a worker is, so this does not gate dispatch — it is how a
-	// customer browsing by service finds the firm at all.
+	// CategoryIDs is what the firm actually does, as ids from the shared list.
+	// A company is never broadcast to the way a worker is, so this does not gate
+	// dispatch. Kept for the firms already on the platform and for admin reads —
+	// the forms no longer write it, Services does.
 	CategoryIDs []string `json:"category_ids"`
+	// Services is the same answer in the firm's own words ("Ta'mirlash, santexnika,
+	// elektrika"). A fixed list never matched what a firm actually sells, and a
+	// firm that found nothing to tick ended up describing itself as nothing at
+	// all — so it is free text, and optional: a firm is bookable without it.
+	Services string `json:"services"`
 	// Lat/Lng is where the office is. Same purpose as Address, for the half of
 	// customers who read a pin faster than a street name, and what the nearby
 	// filter on GET /companies measures from.

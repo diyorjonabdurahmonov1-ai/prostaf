@@ -92,6 +92,11 @@ func (s *Server) handleSetAvatar(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /categories
+//
+// Retired categories are included, carrying active=false. The apps need this
+// list for two things — filling a picker and naming the category on an order
+// that already exists — and hiding the retired rows would answer the first by
+// blanking the service on every old order. Pickers filter on `active`.
 func (s *Server) handleCategories(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.Categories())
 }

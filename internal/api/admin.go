@@ -235,6 +235,7 @@ func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request
 		Images             []string `json:"images"`
 		Price              int64    `json:"price"`
 		CategoryIDs        []string `json:"category_ids"`
+		Services           string   `json:"services"`
 		Lat                float64  `json:"lat"`
 		Lng                float64  `json:"lng"`
 		CreditLimit        int64    `json:"credit_limit"`
@@ -262,6 +263,7 @@ func (s *Server) handleAdminCreateCompany(w http.ResponseWriter, r *http.Request
 		Images:          in.Images,
 		Price:           in.Price,
 		CategoryIDs:     in.CategoryIDs,
+		Services:        in.Services,
 		Lat:             in.Lat,
 		Lng:             in.Lng,
 		CreditLimit:     in.CreditLimit,
@@ -470,6 +472,7 @@ func (s *Server) handleAdminUpdateCompany(w http.ResponseWriter, r *http.Request
 		Phone       *string   `json:"phone"`
 		INN         *string   `json:"inn"`
 		CategoryIDs *[]string `json:"category_ids"`
+		Services    *string   `json:"services"`
 		Lat         *float64  `json:"lat"`
 		Lng         *float64  `json:"lng"`
 
@@ -492,6 +495,7 @@ func (s *Server) handleAdminUpdateCompany(w http.ResponseWriter, r *http.Request
 		Phone:           in.Phone,
 		INN:             in.INN,
 		CategoryIDs:     in.CategoryIDs,
+		Services:        in.Services,
 		Lat:             in.Lat,
 		Lng:             in.Lng,
 		AvatarURL:       in.AvatarURL,
@@ -521,6 +525,94 @@ func (s *Server) handleAdminAnalytics(w http.ResponseWriter, r *http.Request) {
 // GET /admin/finance
 func (s *Server) handleAdminFinance(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.store.FinanceOverview())
+}
+
+// The service list.
+//
+// Every order names a category and every provider claims a few, which makes this
+// the one table the whole platform is indexed by — and the one the office needs
+// to be able to edit without a deploy. See store/categories.go for why a used
+// category is retired rather than deleted.
+
+// GET /admin/categories — the whole list, retired rows included, each carrying
+// what it is holding so the panel knows what may be deleted.
+func (s *Server) handleAdminCategories(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.CategoriesWithUsage())
+}
+
+// POST /admin/categories
+func (s *Server) handleAdminCreateCategory(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		// Key is the stable slug. Left out it is derived from the Uzbek name,
+		// which is what the office types and what the seeded rows were built from.
+		Key    string `json:"key"`
+		NameUz string `json:"name_uz"`
+		NameRu string `json:"name_ru"`
+		NameEn string `json:"name_en"`
+		Icon   string `json:"icon"`
+		Active *bool  `json:"active"`
+		Sort   *int   `json:"sort"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	c, err := s.store.CreateCategory(store.CategoryInput{
+		Key:    in.Key,
+		NameUz: in.NameUz,
+		NameRu: in.NameRu,
+		NameEn: in.NameEn,
+		Icon:   in.Icon,
+		Active: in.Active,
+		Sort:   in.Sort,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, c)
+}
+
+// PATCH /admin/categories/{id}
+//
+// Renaming is safe at any time: the id is what orders and providers point at, so
+// a corrected name simply starts showing up everywhere it was already used.
+func (s *Server) handleAdminUpdateCategory(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Key    *string `json:"key"`
+		NameUz *string `json:"name_uz"`
+		NameRu *string `json:"name_ru"`
+		NameEn *string `json:"name_en"`
+		Icon   *string `json:"icon"`
+		Active *bool   `json:"active"`
+		Sort   *int    `json:"sort"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	c, err := s.store.UpdateCategory(r.PathValue("id"), store.CategoryPatch{
+		Key:    in.Key,
+		NameUz: in.NameUz,
+		NameRu: in.NameRu,
+		NameEn: in.NameEn,
+		Icon:   in.Icon,
+		Active: in.Active,
+		Sort:   in.Sort,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, c)
+}
+
+// DELETE /admin/categories/{id} — only for a category nothing points at.
+// Anything in use comes back as category_in_use; the fix is to retire it.
+func (s *Server) handleAdminDeleteCategory(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteCategory(r.PathValue("id")); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 // The tariff cards.

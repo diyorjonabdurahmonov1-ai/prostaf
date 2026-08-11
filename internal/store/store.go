@@ -40,6 +40,12 @@ var (
 	ErrInvalidINN        = errors.New("invalid_inn")
 	ErrDuplicateINN      = errors.New("duplicate_inn")
 
+	// The two ways editing the service list goes wrong. Both need their own
+	// sentence: "conflict" leaves the operator guessing whether they typed a
+	// duplicate or hit something they are not allowed to remove.
+	ErrDuplicateCategory = errors.New("duplicate_category")
+	ErrCategoryInUse     = errors.New("category_in_use")
+
 	// ErrSubscriptionExpired is a firm trying to take a job with no months left
 	// and no free ones. Separate from ErrInsufficientBalance because the fix is
 	// different: a firm does not top up a wallet, it buys another month.
@@ -113,14 +119,19 @@ func unmarshalStrings(s string) []string {
 
 type catSeed struct{ key, uz, ru, en, icon string }
 
+// The icon column is legacy. The apps draw their own glyph, chosen from the
+// category's stable key (mobile/src/lib/category-icon.ts), because a picture is
+// one more thing the office would have had to answer for before it could add a
+// category — and a name is what a category actually is. Nothing reads this
+// value; the seeds keep it only so the column is not silently empty.
 var categorySeeds = []catSeed{
-	{"banquet_helper", "Bazmga yordamchi", "Помощник на банкете", "Banquet helper", "🎉"},
-	{"gardening", "Bog' ishlari", "Садовые работы", "Gardening", "🌳"},
-	{"mover_coal", "Ko'k tushuruvchi", "Разгрузка", "Mover", "🚚"},
-	{"loader", "Ortuvchi", "Грузчик", "Loader", "📦"},
-	{"post_repair_clean", "Remontdan keyingi tozalash", "Уборка после ремонта", "Post-repair cleaning", "🧹"},
-	{"master_helper", "Ustaga yordamchi", "Помощник мастера", "Master helper", "🔧"},
-	{"room_clean", "Xona tozalash", "Уборка комнат", "Room cleaning", "🧽"},
+	{"banquet_helper", "Bazmga yordamchi", "Помощник на банкете", "Banquet helper", "confetti"},
+	{"gardening", "Bog' ishlari", "Садовые работы", "Gardening", "tree"},
+	{"mover_coal", "Ko'k tushuruvchi", "Разгрузка", "Mover", "truck"},
+	{"loader", "Ortuvchi", "Грузчик", "Loader", "package"},
+	{"post_repair_clean", "Remontdan keyingi tozalash", "Уборка после ремонта", "Post-repair cleaning", "broom"},
+	{"master_helper", "Ustaga yordamchi", "Помощник мастера", "Master helper", "wrench"},
+	{"room_clean", "Xona tozalash", "Уборка комнат", "Room cleaning", "spray-bottle"},
 }
 
 func (s *Store) seed() {
@@ -130,9 +141,11 @@ func (s *Store) seed() {
 	if count > 0 {
 		return
 	}
-	for _, c := range categorySeeds {
-		s.db.Exec("INSERT INTO categories (id, key, name_uz, name_ru, name_en, icon) VALUES ($1, $2, $3, $4, $5, $6)",
-			id.New(), c.key, c.uz, c.ru, c.en, c.icon)
+	// A starting list, not the list: the office edits these rows like any other
+	// from the panel, and this never runs again once any category exists.
+	for i, c := range categorySeeds {
+		s.db.Exec("INSERT INTO categories (id, key, name_uz, name_ru, name_en, icon, sort) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+			id.New(), c.key, c.uz, c.ru, c.en, c.icon, i)
 	}
 
 	// Seed admin from config.
@@ -407,28 +420,8 @@ func (s *Store) VerifyOTP(phone, code string) bool {
 	return err == nil
 }
 
-// ---- Categories -------------------------------------------------------------
-
-func (s *Store) Categories() []models.Category {
-	rows, err := s.db.Query("SELECT id, key, name_uz, name_ru, name_en, icon FROM categories")
-	if err != nil {
-		return nil
-	}
-	defer rows.Close()
-	var out []models.Category
-	for rows.Next() {
-		var c models.Category
-		rows.Scan(&c.ID, &c.Key, &c.NameUz, &c.NameRu, &c.NameEn, &c.Icon)
-		out = append(out, c)
-	}
-	return out
-}
-
-func (s *Store) categoryExists(catID string) bool {
-	var n int
-	s.db.QueryRow("SELECT COUNT(*) FROM categories WHERE id=$1", catID).Scan(&n)
-	return n > 0
-}
+// Categories live in categories.go — the list is admin-editable, which is more
+// than a pair of readers' worth of rules.
 
 // ---- Notifications ----------------------------------------------------------
 

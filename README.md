@@ -47,7 +47,15 @@ go vet ./...     # vets clean
 Seeded on first run into an empty database, then persisted like anything else.
 
 Categories (7): `banquet_helper`, `gardening`, `mover_coal`, `loader`,
-`post_repair_clean`, `master_helper`, `room_clean` (uz/ru/en names + emoji icon).
+`post_repair_clean`, `master_helper`, `room_clean` (uz/ru/en names). The apps
+derive each category's glyph from its `key`; the `icon` column is legacy and
+unread, so the admin form asks for a name and nothing else.
+A starting list, not the list — the admin panel adds, renames, reorders and
+retires them (`/admin/categories`), and this seed never runs again once any
+category exists. A category in use is retired (`active: false`) rather than
+deleted, so the orders already filed under it keep a name to show; only an
+unreferenced row can be removed. `GET /categories` therefore returns retired rows
+too, and anything offering a *choice* filters on `active`.
 
 The admin account from `ADMIN_PHONE` (default `+998900000000`).
 
@@ -188,7 +196,8 @@ backend/
   internal/auth/jwt.go         HS256 JWT sign/verify (stdlib)
   internal/sse/hub.go          in-process SSE hub (userID -> subscriber channels)
   internal/store/
-    store.go                   core store, seeding, users, categories, OTP, notifications
+    store.go                   core store, seeding, users, OTP, notifications
+    categories.go              the service list: admin CRUD, retire-vs-delete rule
     worker.go                  worker + company profiles
     order.go                   order lifecycle, matchmaking, invite/accept/expire, rating
     wallet.go                  wallet + payments

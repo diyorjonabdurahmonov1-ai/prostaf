@@ -63,6 +63,13 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrDuplicateINN):
 		writeError(w, http.StatusConflict, "duplicate_inn",
 			"Bu INN allaqachon ro'yxatdan o'tgan.")
+	case errors.Is(err, store.ErrDuplicateCategory):
+		writeError(w, http.StatusConflict, "duplicate_category",
+			"Bunday kategoriya allaqachon bor.")
+	case errors.Is(err, store.ErrCategoryInUse):
+		writeError(w, http.StatusConflict, "category_in_use",
+			"Bu kategoriya buyurtma yoki ijrochilarda ishlatilmoqda — o'chirib bo'lmaydi. "+
+				"Uni o'chirish o'rniga faolsizlantiring.")
 	case errors.Is(err, store.ErrOrderNotSaved):
 		writeError(w, http.StatusInternalServerError, "order_not_saved",
 			"Buyurtma saqlanmadi. Qayta urinib ko'ring.")

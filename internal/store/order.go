@@ -134,7 +134,9 @@ const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, 
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
-	if in.CategoryID == "" || !s.categoryExists(in.CategoryID) {
+	// Bookable, not merely existing: a category the office retired keeps its name
+	// on the orders already filed under it, but takes no new ones.
+	if in.CategoryID == "" || !s.categoryBookable(in.CategoryID) {
 		return nil, ErrBadRequest
 	}
 	if in.Gender == "" {

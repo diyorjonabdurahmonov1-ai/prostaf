@@ -443,6 +443,8 @@ type AdminCompanyInput struct {
 	Images      []string
 	Price       int64
 	CategoryIDs []string
+	// Services is what the firm does, in words. Optional — see CompanyInput.
+	Services    string
 	Lat         float64
 	Lng         float64
 	CreditLimit int64
@@ -498,6 +500,7 @@ func (s *Store) AdminCreateCompany(in AdminCompanyInput) (*models.User, error) {
 		Images:          in.Images,
 		Price:           in.Price,
 		CategoryIDs:     in.CategoryIDs,
+		Services:        in.Services,
 		Lat:             in.Lat,
 		Lng:             in.Lng,
 		AvatarURL:       in.AvatarURL,
