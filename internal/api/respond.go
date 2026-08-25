@@ -70,6 +70,12 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "category_in_use",
 			"Bu kategoriya buyurtma yoki ijrochilarda ishlatilmoqda — o'chirib bo'lmaydi. "+
 				"Uni o'chirish o'rniga faolsizlantiring.")
+	case errors.Is(err, store.ErrFileTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large",
+			"Rasm hajmi juda katta. Kichikroq rasm tanlang.")
+	case errors.Is(err, store.ErrUnsupportedMedia):
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media",
+			"Bu turdagi fayl qo'llab-quvvatlanmaydi. JPG, PNG yoki WEBP rasm tanlang.")
 	case errors.Is(err, store.ErrOrderNotSaved):
 		writeError(w, http.StatusInternalServerError, "order_not_saved",
 			"Buyurtma saqlanmadi. Qayta urinib ko'ring.")
@@ -116,6 +122,15 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if err := dec.Decode(dst); err != nil {
 		if err.Error() == "EOF" {
 			return true
+		}
+		// A body the handler capped with http.MaxBytesReader. Reporting it as
+		// malformed JSON would send whoever picked a 20-megapixel photo looking
+		// for a bug in the app; it is not broken, it is too big.
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "file_too_large",
+				"Rasm hajmi juda katta. Kichikroq rasm tanlang.")
+			return false
 		}
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid JSON body")
 		return false

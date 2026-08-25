@@ -1,0 +1,161 @@
+# main -> tests -> image -> server. Nothing else ships.
+#
+# The image is built here rather than on the server on purpose. Compiling Go
+# takes about a gigabyte and a couple of minutes, and the machine it would take
+# them from is a 4 GB box already running Postgres under a 1.8 GB limit and the
+# API under 900 MB. A build competing with those is how an unattended deploy
+# turns into an OOM kill of the process that was serving perfectly well. Built
+# here it costs the server nothing, the deploy itself becomes a pull — seconds
+# rather than minutes — and the image it replaces stays on the disk to roll
+# back to.
+#
+# Secrets to set once, in Settings -> Secrets and variables -> Actions:
+#
+#   SSH_HOST          the server's IP or hostname
+#   SSH_USER          the account deploy.sh runs as; must be in the docker group
+#   SSH_PRIVATE_KEY   the whole private key, BEGIN/END lines included
+#   SSH_KNOWN_HOSTS   `ssh-keyscan <host>` output — see README, "CI/CD"
+#   SSH_PORT          optional; 22 unless set
+#
+# The registry needs no secret of its own: GITHUB_TOKEN may write packages
+# belonging to its own repository, and the same short-lived token is handed to
+# the server for the pull and expires with the run. Nothing long-lived is left
+# on the box — a stored registry credential would mean that whoever takes the
+# server also takes the registry.
+
+name: CI / Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# One deploy at a time, and never cancelled half way. Two overlapping runs race
+# on `docker compose up` and can leave the newer image running under the older
+# run's compose file, which is a state nobody goes looking for.
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+env:
+  # Match the Dockerfile's builder. Testing on a different version from the one
+  # that ships is a way of hearing about an incompatibility from production
+  # instead of from CI.
+  GO_VERSION: "1.24"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      # No -race yet. It reports a genuine race, but in a test rather than in
+      # the server: push.Send delivers on a background goroutine, and
+      # TestABadFCMKeyDoesNotCostTheUserTheirToken returns while that goroutine
+      # is still reading expoURL, which t.Cleanup is by then restoring. The
+      # production path writes expoURL once at startup and never again. Turn
+      # -race on here once the test waits for the goroutine it started.
+      - name: test
+        run: go test ./...
+
+      # Informational for now: gofmt lists most of the tree because those files
+      # were written with CRLF line endings, which is a line-ending problem and
+      # not a formatting one. Drop continue-on-error once they are normalised —
+      # see README, "CI/CD".
+      - name: gofmt
+        continue-on-error: true
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  build:
+    needs: test
+    # A pull request gets the tests and stops there. Only main reaches a server.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.name.outputs.image }}
+      tag: ${{ steps.name.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # GHCR accepts lowercase names only and this owner is not written in
+      # lowercase, so the name is derived rather than pasted. The tag is the
+      # commit: an immutable name for what is running, which is the thing you
+      # want to have when a deploy has to be undone at speed.
+      - id: name
+        run: |
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-$(echo '${{ github.sha }}' | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.name.outputs.image }}:${{ steps.name.outputs.tag }}
+            ${{ steps.name.outputs.image }}:latest
+          # Go's module and build caches, kept between runs. Without them every
+          # deploy recompiles pgx and golang.org/x/crypto from source.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # Only for scripts/deploy.sh, which is piped to the server below. Running
+      # the workflow's copy rather than the server's means the deploy is carried
+      # out by the commit being deployed.
+      - uses: actions/checkout@v4
+
+      - name: ssh key
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          # A pinned host key, not ssh-keyscan at deploy time. Scanning trusts
+          # whatever answers on the day, which is the one thing the known_hosts
+          # file exists to stop.
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: deploy
+        run: |
+          ssh -i ~/.ssh/id_deploy -p "${{ secrets.SSH_PORT || '22' }}" \
+            "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "IMAGE='${{ needs.build.outputs.image }}' \
+             IMAGE_TAG='${{ needs.build.outputs.tag }}' \
+             GHCR_USER='${{ github.actor }}' \
+             GHCR_TOKEN='${{ secrets.GITHUB_TOKEN }}' \
+             sh -s" < scripts/deploy.sh

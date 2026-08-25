@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -34,6 +35,11 @@ var eskizHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 // eskizOffOnce keeps the "SMS is switched off" notice to a single log line.
 var eskizOffOnce sync.Once
+
+// errSMSBudget is returned when the platform has already sent as many messages
+// this hour as SMS_HOURLY_BUDGET allows. It is not a provider failure — nothing
+// was attempted — so it is its own error rather than a wrapped Eskiz one.
+var errSMSBudget = errors.New("eskiz: hourly SMS budget spent")
 
 func (s *Server) sendOTPCode(phone, code string) error {
 	return s.sendEskizSMS(phone, eskizTemplateOTP, map[string]string{"kod": code})
@@ -75,6 +81,21 @@ func (s *Server) sendEskizSMS(phone, template string, vars map[string]string) er
 	to, ok := normalizeEskizPhone(phone)
 	if !ok {
 		return fmt.Errorf("eskiz: %q is not a valid Uzbek mobile number", phone)
+	}
+
+	// Everything past this line costs money, so it is the line the budget goes
+	// on: one funnel, every template, whatever calls it. Taken after the number
+	// is validated so a malformed request cannot spend the allowance, and before
+	// the token fetch so a blocked send costs nothing at all.
+	//
+	// Reaching this is worth looking at rather than ignoring. Legitimate traffic
+	// does not approach the cap — a real hour of sign-ups is well under it — so
+	// the log line below appearing means either the platform has grown past
+	// SMS_HOURLY_BUDGET or somebody is walking a list of numbers through
+	// /auth/otp/request.
+	if !s.smsBudget.take() {
+		log.Printf("eskiz: hourly SMS budget spent — not sending to %s", to)
+		return errSMSBudget
 	}
 	message := renderTemplate(template, vars)
 

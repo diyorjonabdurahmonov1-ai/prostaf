@@ -92,6 +92,16 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "unknown or inactive user")
 			return
 		}
+		// Rate limited here rather than at the front door, because here is where
+		// the caller has a name. An address would be a carrier NAT with a city
+		// behind it; a user id is one account, so the limit can be tight enough
+		// to mean something without a shared IP ever being the reason somebody
+		// cannot book a cleaner. See ratelimit.go.
+		if !s.userLimit.allow(u.ID) {
+			writeError(w, http.StatusTooManyRequests, "too_many_requests",
+				"too many requests — please slow down")
+			return
+		}
 		ctx := context.WithValue(r.Context(), userCtxKey, u)
 		next(w, r.WithContext(ctx))
 	}

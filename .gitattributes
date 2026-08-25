@@ -1,0 +1,8 @@
+# The deploy scripts run on Linux, and scripts/deploy.sh is piped straight into
+# `sh` over ssh. A CRLF checkout makes them fail on the first line with an error
+# naming a command that does not exist — the carriage return having become part
+# of its name. Cheap to pin, and it costs nothing here because these files are
+# new.
+*.sh text eol=lf
+Dockerfile text eol=lf
+Caddyfile text eol=lf

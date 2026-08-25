@@ -1,3 +1,12 @@
+# Secrets. The runtime stage copies only the binary, so these never reached the
+# image that ships — but `COPY . .` put them in a build layer, and a build layer
+# is something that gets pushed to a registry and pulled by whoever can read it.
+.env
+.env.*
+!.env.example
+secrets/
+*service-account*.json
+
 # Build artifacts
 tmp/
 *.exe

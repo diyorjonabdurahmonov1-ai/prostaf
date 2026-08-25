@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -17,6 +19,17 @@ import (
 // Reply: { "url": "https://host/api/v1/files/<id>", "id": "<id>" }
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	u := userFrom(r)
+
+	// The size cap used to apply to the *decoded* image, which is a cap that
+	// arrives too late: the body is read into memory, and the base64 of it is
+	// read into memory again, before anything measures either. A request
+	// claiming to be a two-gigabyte photo would be two gigabytes of heap on a
+	// server that has four, and no reverse proxy limits bodies by default.
+	//
+	// So the body is capped where it is read. Base64 costs four bytes for every
+	// three, and the JSON around it is a few dozen more; the slack covers both.
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes*4/3+4096)
+
 	var body struct {
 		Data string `json:"data"`
 		Mime string `json:"mime"`
@@ -52,18 +65,43 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 
 // GET /files/{id} — public on purpose: <Image> tags send no Authorization
 // header, and the id is a random uuid, so the URL is the capability.
+//
+// Served through http.ServeContent for what it handles that a plain Write does
+// not: a conditional request answered with 304 instead of the image again, and
+// a range request, which is how a phone resumes a photo whose download was cut
+// off by a lift. For a file on disk it also means the bytes go from the page
+// cache to the socket without passing through this process.
 func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 	f, ok := s.store.GetFile(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "file not found")
 		return
 	}
+
 	h := w.Header()
 	h.Set("Content-Type", f.Mime)
-	// Stored bytes never change under an id, so let every layer keep them.
+	// Stored bytes never change under an id, so let every layer keep them —
+	// and for the same reason the id itself is a valid ETag.
 	h.Set("Cache-Control", "public, max-age=31536000, immutable")
-	w.WriteHeader(http.StatusOK)
-	w.Write(f.Bytes)
+	h.Set("ETag", `"`+f.ID+`"`)
+
+	if f.OnDisk() {
+		content, modTime, err := s.store.OpenFile(f)
+		if err != nil {
+			// The row says there is a file and there is not. Almost always a
+			// restore that brought the database back without the upload
+			// directory, so name the path — it is the one detail that turns a
+			// screenful of 404s into an obvious missing volume.
+			log.Printf("files: %s missing from disk (%s): %v", f.ID, f.Path, err)
+			writeError(w, http.StatusNotFound, "not_found", "file not found")
+			return
+		}
+		defer content.Close()
+		http.ServeContent(w, r, "", modTime, content)
+		return
+	}
+
+	http.ServeContent(w, r, "", f.CreatedAt, bytes.NewReader(f.Bytes))
 }
 
 // splitDataURI accepts either bare base64 or a full `data:image/png;base64,...`
@@ -85,7 +123,13 @@ func splitDataURI(s string) (payload, mime string) {
 
 // publicBase reconstructs the origin the client reached us on, so the URL we
 // hand back works from the phone rather than pointing at the container's own
-// idea of localhost. Render terminates TLS in front of us, hence X-Forwarded-*.
+// idea of localhost.
+//
+// TLS is terminated in front of us — by Render, or by Caddy/nginx on a server
+// of our own — hence X-Forwarded-*. A proxy that forgets to send
+// X-Forwarded-Proto makes every uploaded URL an `http://` one, and Android
+// blocks cleartext by default: the upload succeeds and the photo never loads.
+// See the deploy Caddyfile, which sets both headers.
 func publicBase(r *http.Request) string {
 	scheme := "http"
 	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {

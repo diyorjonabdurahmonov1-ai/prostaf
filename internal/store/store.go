@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"prostaff/internal/blob"
 	"prostaff/internal/config"
 	"prostaff/internal/id"
 	"prostaff/internal/models"
@@ -55,6 +56,13 @@ var (
 	// listed but cannot take the job today.
 	ErrCompanyUnavailable = errors.New("company_unavailable")
 
+	// The two ways an upload is refused. Both were ErrBadRequest, which reaches
+	// the phone as "invalid request" — a sentence that tells somebody whose
+	// photo just failed nothing about the one thing they can do next, which is
+	// pick a smaller or differently formatted one.
+	ErrFileTooLarge     = errors.New("file_too_large")
+	ErrUnsupportedMedia = errors.New("unsupported_media")
+
 	// ErrPriceNotSet is a term nobody has priced: no tariff card of that length
 	// and no price named in the request. Selling it anyway would book a
 	// subscription for nothing and record it as paid.
@@ -66,17 +74,21 @@ const matchRadiusKm = 15.0
 
 // Store wraps a PostgreSQL database with domain methods.
 type Store struct {
-	db       *sql.DB
-	cfg      config.Config
+	db  *sql.DB
+	cfg config.Config
+	// blobs is where uploaded images are written. Nil when UPLOAD_DIR is unset,
+	// which puts the bytes back in the database — see internal/blob.
+	blobs    *blob.Store
 	settings models.Settings
 }
 
 // New creates a store backed by the given database, seeds categories if empty,
-// and loads settings.
-func New(cfg config.Config, db *sql.DB) *Store {
+// and loads settings. blobs may be nil, meaning uploads stay in Postgres.
+func New(cfg config.Config, db *sql.DB, blobs *blob.Store) *Store {
 	s := &Store{
-		db:  db,
-		cfg: cfg,
+		db:    db,
+		cfg:   cfg,
+		blobs: blobs,
 		settings: models.Settings{
 			CommissionPercent:      cfg.CommissionPercent,
 			MinBalance:             cfg.MinBalance,
@@ -98,6 +110,9 @@ func New(cfg config.Config, db *sql.DB) *Store {
 	}
 	return s
 }
+
+// Ping reports whether the database is reachable, for the health endpoint.
+func (s *Store) Ping() error { return s.db.Ping() }
 
 // ---- JSON helpers -----------------------------------------------------------
 

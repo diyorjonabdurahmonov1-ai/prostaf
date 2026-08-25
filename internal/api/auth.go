@@ -85,6 +85,22 @@ func (c *phoneCooldown) hit(scope, phone string) (int, bool) {
 	return 0, true
 }
 
+// lockedOut answers a caller who has run out of attempts and reports whether it
+// did, so a handler can start with `if lockedOut(...) { return }`.
+//
+// The message says how long the wait is rather than only that there is one: a
+// locked-out person is nearly always somebody who mistyped their own password
+// four times, and "try again later" is what makes them phone the office.
+func lockedOut(w http.ResponseWriter, l *attemptLimiter, key string) bool {
+	left, locked := l.locked(key)
+	if !locked {
+		return false
+	}
+	writeError(w, http.StatusTooManyRequests, "too_many_attempts",
+		fmt.Sprintf("too many failed attempts — try again in %d minutes", int(left.Minutes())+1))
+	return true
+}
+
 // ---- Handlers ---------------------------------------------------------------
 
 // POST /auth/otp/request — body { phone } → { sent, dev_code? }
@@ -160,6 +176,12 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 	if body.Password != "" && !validPassword(w, body.Password) {
 		return
 	}
+	// Wrong codes are counted. A six-digit code that lives two minutes is a
+	// small enough space that an unlimited guesser gets in eventually, and
+	// nothing here was counting — see ratelimit.go.
+	if lockedOut(w, otpAttempts, phone) {
+		return
+	}
 	// A password here means "finish signing up". Refuse before the code is spent
 	// if the number was claimed in the meantime, so an existing account can never
 	// have its name and password replaced through this route.
@@ -171,9 +193,11 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !s.store.VerifyOTP(phone, code) {
+		otpAttempts.fail(phone)
 		writeError(w, http.StatusUnauthorized, "invalid_code", "the code is wrong, already used, or has expired")
 		return
 	}
+	otpAttempts.pass(phone)
 
 	u, _ := s.store.GetOrCreateUserByPhone(phone)
 	if u == nil {
@@ -213,13 +237,21 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	phone := store.NormalizePhone(body.Phone)
+	// Counted per number, and the count is what makes bcrypt's cost a defence
+	// rather than a liability: every guess is deliberately expensive to check,
+	// so an unlimited guesser is also a way to spend the server's CPU.
+	if lockedOut(w, loginAttempts, phone) {
+		return
+	}
 	u, ok := s.store.GetUserByPhone(phone)
 	// One message for "no such phone" and "wrong password" alike, so the endpoint
 	// can't be used to find out which numbers are registered.
 	if !ok || !passwordMatches(s.store.GetPasswordHash(u.ID), body.Password) {
+		loginAttempts.fail(phone)
 		writeError(w, http.StatusUnauthorized, "unauthorized", "phone or password is incorrect")
 		return
 	}
+	loginAttempts.pass(phone)
 	if !u.Active {
 		writeError(w, http.StatusForbidden, "forbidden", "this account is blocked")
 		return
@@ -238,8 +270,14 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	email := strings.TrimSpace(body.Email)
+	// The admin account is the one worth guessing, and its address is not a
+	// secret. Same counter as the phone login, keyed by email.
+	if lockedOut(w, loginAttempts, email) {
+		return
+	}
 	u, ok := s.store.GetUserByEmail(email)
 	if !ok || !u.HasRole(models.RoleAdmin) {
+		loginAttempts.fail(email)
 		writeError(w, http.StatusUnauthorized, "unauthorized", "email or password is incorrect")
 		return
 	}
@@ -253,9 +291,11 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 			body.Password != "" && body.Password == s.cfg.AdminPassword
 	}
 	if !authorized {
+		loginAttempts.fail(email)
 		writeError(w, http.StatusUnauthorized, "unauthorized", "email or password is incorrect")
 		return
 	}
+	loginAttempts.pass(email)
 	if !u.Active {
 		writeError(w, http.StatusForbidden, "forbidden", "this account is blocked")
 		return
@@ -338,11 +378,18 @@ func (s *Server) handleForgotPasswordVerify(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Counted like every other code: this one is worth more, because what it
+	// buys is a token that sets a password on somebody else's account.
+	if lockedOut(w, otpAttempts, phone) {
+		return
+	}
 	u, ok := s.store.GetUserByPhone(phone)
 	if !ok || !u.Active || !s.store.VerifyOTP(phone, code) {
+		otpAttempts.fail(phone)
 		writeError(w, http.StatusUnauthorized, "invalid_code", "the code is wrong, already used, or has expired")
 		return
 	}
+	otpAttempts.pass(phone)
 
 	token, err := auth.Sign(s.cfg.JWTSecret, resetSubject(u.ID), resetTokenTTL)
 	if err != nil {

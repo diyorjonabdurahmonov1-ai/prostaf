@@ -4,20 +4,48 @@ package db
 import (
 	"database/sql"
 	"log"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
-// Open connects to PostgreSQL and runs migrations.
+// connMaxLifetime retires a connection after half an hour whatever its state.
+//
+// Not a leak fix — Go returns connections to the pool on its own. It is what
+// keeps a pool from ending up entirely made of connections some middlebox has
+// silently dropped, and what lets Postgres actually finish a restart instead of
+// waiting on backends nothing intends to use again.
+const connMaxLifetime = 30 * time.Minute
+
+// Open connects to PostgreSQL, sizes the connection pool and runs migrations.
 // dsn example: "postgres://user:pass@localhost:5432/prostaff?sslmode=disable"
-func Open(dsn string) *sql.DB {
+//
+// maxOpen is the cap that matters on a small server. Go leaves it unlimited by
+// default, and unlimited means a traffic spike opens a Postgres backend process
+// per concurrent query until the box is out of memory — the API, the database
+// and everything else on the machine dying together. See config.DBMaxOpenConns.
+func Open(dsn string, maxOpen, maxIdle int) *sql.DB {
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		log.Fatalf("db: open: %v", err)
 	}
+	if maxOpen > 0 {
+		db.SetMaxOpenConns(maxOpen)
+		// More idle connections than the pool may open is a setting Go silently
+		// reduces anyway; doing it here keeps the logged numbers honest.
+		if maxIdle > maxOpen {
+			maxIdle = maxOpen
+		}
+	}
+	if maxIdle > 0 {
+		db.SetMaxIdleConns(maxIdle)
+	}
+	db.SetConnMaxLifetime(connMaxLifetime)
+
 	if err := db.Ping(); err != nil {
 		log.Fatalf("db: ping: %v", err)
 	}
+	log.Printf("db: pool capped at %d connection(s), %d kept idle", maxOpen, maxIdle)
 	migrate(db)
 	return db
 }
@@ -219,10 +247,9 @@ func migrate(db *sql.DB) {
 		// filled it in before keep their line on screen.
 		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS services TEXT NOT NULL DEFAULT ''`,
 
-		// Uploaded images live in the database, not on disk: the server runs on a
-		// host with an ephemeral filesystem, and a photo that disappears on the
-		// next deploy is worse than no photo at all. Rows are small (a picker
-		// image at 0.6 quality is well under a megabyte) and read by id only.
+		// Uploaded images. Originally the bytes themselves lived here, because the
+		// server ran on a host with an ephemeral filesystem and a photo that
+		// disappears on the next deploy is worse than no photo at all.
 		`CREATE TABLE IF NOT EXISTS files (
 			id         TEXT PRIMARY KEY,
 			user_id    TEXT NOT NULL DEFAULT '',
@@ -230,6 +257,19 @@ func migrate(db *sql.DB) {
 			bytes      BYTEA NOT NULL,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+
+		// On a server with a disk of its own, they do not. A row now names a file
+		// (`path`) instead of carrying it, and `bytes` is what the rows written
+		// before this change still hold — hence nullable, and hence a read that
+		// tries the path first and falls back. Nothing has to be moved for the
+		// platform to keep working; UPLOAD_MIGRATE moves it when you are ready.
+		//
+		// The reason to bother: every image in `bytes` is an image in `pg_dump`,
+		// in the WAL, and in the pages Postgres is caching instead of caching
+		// orders. A folder of JPEGs is none of those things.
+		`ALTER TABLE files ADD COLUMN IF NOT EXISTS path TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE files ADD COLUMN IF NOT EXISTS size BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE files ALTER COLUMN bytes DROP NOT NULL`,
 
 		// A verification code is only good for a couple of minutes; without an
 		// issue time an old row would stay valid forever (added after initial
@@ -456,6 +496,48 @@ func migrate(db *sql.DB) {
 		// five people. Knowing the size up front is what lets the very first wave
 		// take a fair share instead.
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_size INTEGER NOT NULL DEFAULT 1`,
+
+		// Which job a photo was uploaded for, if it was uploaded for one.
+		//
+		// This is what makes deleting a finished job's photos safe. Without it the
+		// only link between an order and its images is a list of URLs in a TEXT
+		// column, and deciding whether a given file is a job photo or somebody's
+		// avatar means pattern-matching that column against every profile on the
+		// platform — expensive, and wrong the first time somebody's avatar URL
+		// happens to appear in an order.
+		//
+		// Empty is the default and the important case: a profile photo never gets
+		// an order stamped on it, so no cleanup can ever reach one.
+		`ALTER TABLE files ADD COLUMN IF NOT EXISTS order_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_files_order ON files(order_id) WHERE order_id <> ''`,
+
+		// When the job stopped being a job.
+		//
+		// created_at cannot stand in for it: an order placed in January and closed
+		// today has been over for an hour, and anything that waits a week before
+		// deleting its photos would read that row as ten months stale and delete
+		// them at once. NULL on every order closed before this column existed,
+		// which the sweeper reads as "closed long enough ago" — those photos are
+		// months old and are exactly what needs clearing on the first run.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS closed_at TIMESTAMPTZ`,
+
+		// Finding the closed orders whose photos are still on disk. Partial, so it
+		// indexes only the rows the sweeper is looking for rather than every order
+		// ever placed — the whole table is scanned otherwise, every few minutes,
+		// forever.
+		`CREATE INDEX IF NOT EXISTS idx_orders_photo_purge
+			ON orders(status) WHERE images <> '[]'`,
+
+		// The dispatch sweep, twice. `busyWorkers` asks which of a list of workers
+		// are on a job right now: a partial index over the live orders alone, which
+		// is a few dozen rows, rather than idx_orders_worker walking every order the
+		// worker has ever had. `shortlistFor` reads the online workers on every wave
+		// and every "workers near me" screen, which without this is a sequential
+		// scan of the whole worker table each time.
+		`CREATE INDEX IF NOT EXISTS idx_orders_worker_live
+			ON orders(worker_id) WHERE status IN ('accepted','in_progress')`,
+		`CREATE INDEX IF NOT EXISTS idx_workers_dispatch
+			ON workers(user_id) WHERE online AND NOT banned`,
 
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,

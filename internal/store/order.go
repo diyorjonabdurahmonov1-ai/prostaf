@@ -54,6 +54,41 @@ func (s *Store) WorkerIsBusy(workerUserID string) bool {
 	return err == nil && n > 0
 }
 
+// busyWorkers is WorkerIsBusy asked about a list of workers at once.
+//
+// The dispatch sweep asks it about everyone the radius and category filters
+// left, every DispatchInterval, for every order searching — which as one query
+// per worker was the single most expensive thing the platform did per unit of
+// traffic. As one query it is an index scan over the handful of orders that are
+// currently live.
+//
+// An error is logged and answered with "nobody is busy". A worker who is on a
+// job and gets rung anyway is refused by Accept and loses a card; a sweep that
+// treats a database hiccup as "everyone is busy" dispatches to nobody, which
+// nothing downstream would report as anything but an empty city.
+func (s *Store) busyWorkers(workerUserIDs []string) map[string]bool {
+	busy := make(map[string]bool, len(workerUserIDs))
+	if len(workerUserIDs) == 0 {
+		return busy
+	}
+	rows, err := s.db.Query(
+		`SELECT DISTINCT worker_id FROM orders
+		 WHERE worker_id = ANY($1) AND status IN ('accepted','in_progress')`,
+		workerUserIDs)
+	if err != nil {
+		log.Printf("store: busy sweep failed, dispatching without it: %v", err)
+		return busy
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var userID string
+		if rows.Scan(&userID) == nil {
+			busy[userID] = true
+		}
+	}
+	return busy
+}
+
 // HasHiredWorker reports whether this worker ever took a job from this
 // customer. It is the gate on the worker's phone number: the platform hands it
 // over once the two are actually working together, and never for a browser
@@ -202,6 +237,10 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 		log.Printf("store: order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
+	// After the insert, so a photo is never marked as belonging to an order that
+	// failed to save — that file would then be deleted by nothing and kept
+	// forever, which is the leak the tagging exists to close.
+	s.tagOrderPhotos(o.ID, customerID, o.Images)
 	return o, nil
 }
 
@@ -277,6 +316,7 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 		log.Printf("store: company order insert failed: %v", err)
 		return nil, ErrOrderNotSaved
 	}
+	s.tagOrderPhotos(o.ID, customerID, o.Images)
 	return o, nil
 }
 
@@ -563,10 +603,73 @@ func (s *Store) batchEngagedWorkers(o *models.Order) (map[string]bool, int) {
 // online, not banned, eligible under matchesOrder, not already on a job, not
 // already ringing for a sibling order, and able to afford the commission —
 // nearest first.
+//
+// It costs a fixed three queries rather than a number that grows with the city.
+// The obvious way to write it is a cursor over the online workers with the two
+// remaining questions asked per row, and that is what this was: 1 + 2n round
+// trips, every DispatchInterval, for every order still searching. Six hundred
+// workers online and ten open searches is around a thousand queries a second,
+// spent almost entirely on workers the radius filter was about to drop anyway.
+// So the rules that need nothing but the row run first, and the two lookups are
+// asked once, for the handful that survived them.
 func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 	// One read for the whole sweep rather than a query per candidate.
 	engaged, _ := s.batchEngagedWorkers(o)
 
+	shortlist := s.shortlistFor(o, engaged)
+	if len(shortlist) == 0 {
+		return nil
+	}
+
+	// The two facts that live in other tables. Both are filters against noise
+	// rather than gates on the job: Accept asks the same two questions again,
+	// and it is the answer there that decides who actually gets the work. That
+	// is why both lookups fail open — ringing a worker who turns out to be busy
+	// costs one dead card on one phone, while failing closed is an order that
+	// silently rings nobody and expires looking like the platform is empty.
+	userIDs := make([]string, 0, len(shortlist))
+	needWallet := make([]string, 0, len(shortlist))
+	for i := range shortlist {
+		userIDs = append(userIDs, shortlist[i].UserID)
+		// A worker still inside the trial never has their balance looked at, so
+		// there is no reason to fetch it.
+		if shortlist[i].FreeOrdersLeft() == 0 {
+			needWallet = append(needWallet, shortlist[i].UserID)
+		}
+	}
+	busy := s.busyWorkers(userIDs)
+	solvent := s.walletsCanAccept(needWallet)
+
+	out := make([]models.WorkerProfile, 0, len(shortlist))
+	for _, wp := range shortlist {
+		// Already on a job — not available until it is finished.
+		if busy[wp.UserID] {
+			continue
+		}
+		// A worker who could not accept if they tried is pure noise on the
+		// broadcast — but a brand-new one with free jobs left can accept with an
+		// empty wallet, which is the whole point of the trial, so this asks the
+		// same question Accept will ask rather than only looking at the money.
+		if wp.FreeOrdersLeft() == 0 && !solvent[wp.UserID] {
+			continue
+		}
+		dist := geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng)
+		wp.DistanceKm = &dist
+		out = append(out, wp)
+	}
+	sort.Slice(out, func(i, j int) bool { return *out[i].DistanceKm < *out[j].DistanceKm })
+	return out
+}
+
+// shortlistFor is the first pass of the sweep: the online workers this order is
+// allowed to ring, on the rules that need nothing beyond the row itself.
+//
+// It is a function of its own so that the cursor is closed before candidatesFor
+// asks the database anything more. A rows loop holds a pool connection open for
+// as long as it runs, and querying inside one means every dispatching goroutine
+// holds two of the thirty the pool is capped at (DB_MAX_OPEN_CONNS) — which
+// under a burst of simultaneous searches is a pool deadlocking against itself.
+func (s *Store) shortlistFor(o *models.Order, engaged map[string]bool) []models.WorkerProfile {
 	rows, err := s.db.Query("SELECT " + workerCols + " FROM workers WHERE online=TRUE AND banned=FALSE")
 	if err != nil {
 		return nil
@@ -585,22 +688,8 @@ func (s *Store) candidatesFor(o *models.Order) []models.WorkerProfile {
 		if engaged[wp.ID] {
 			continue
 		}
-		// Already on a job — not available until it is finished.
-		if s.WorkerIsBusy(wp.UserID) {
-			continue
-		}
-		// A worker who could not accept if they tried is pure noise on the
-		// broadcast — but a brand-new one with free jobs left can accept with an
-		// empty wallet, which is the whole point of the trial, so this asks the
-		// same question Accept will ask rather than only looking at the money.
-		if !s.canWorkerAccept(wp) {
-			continue
-		}
-		dist := geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng)
-		wp.DistanceKm = &dist
 		out = append(out, *wp)
 	}
-	sort.Slice(out, func(i, j int) bool { return *out[i].DistanceKm < *out[j].DistanceKm })
 	return out
 }
 
@@ -899,7 +988,7 @@ func (s *Store) allTargetsRejected(o *models.Order) bool {
 // had only just started again.
 func (s *Store) ExpireIfSearching(orderID string) (*models.Order, bool) {
 	res, err := s.db.Exec(
-		`UPDATE orders SET status=$1, invite_expires_at=NULL
+		`UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW()
 		 WHERE id=$2 AND worker_id='' AND status IN ('pending','matching','invited')
 		   AND (invite_expires_at IS NULL OR invite_expires_at <= NOW())`,
 		models.StatusExpired, orderID)
@@ -913,6 +1002,10 @@ func (s *Store) ExpireIfSearching(orderID string) (*models.Order, bool) {
 	if !ok {
 		return nil, false
 	}
+	// A search that found nobody is as finished as a job that was done, and its
+	// photos are worth exactly as much — nothing. This is the common case on a
+	// quiet night, and the one that would otherwise fill the disk fastest.
+	s.purgeOnClose(o)
 	return o, true
 }
 
@@ -920,8 +1013,10 @@ func (s *Store) ExpireIfSearching(orderID string) (*models.Order, bool) {
 // down — their dispatch loops died with the process, so nothing else would ever
 // finish them. Returns how many were closed.
 func (s *Store) ExpireStaleSearches() int64 {
+	// Photos are not touched here: this closes an unbounded number of orders in
+	// one statement, and the sweeper in cmd/server is what cleans up after it.
 	res, err := s.db.Exec(
-		`UPDATE orders SET status=$1, invite_expires_at=NULL
+		`UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW()
 		 WHERE worker_id='' AND status IN ('matching','invited')
 		   AND invite_expires_at IS NOT NULL AND invite_expires_at <= NOW()`,
 		models.StatusExpired)
@@ -944,8 +1039,11 @@ func (s *Store) Complete(orderID, actorID string) (*models.Order, error) {
 	}
 	o.Status = models.StatusCompleted
 	o.InviteExpiresAt = nil
-	s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL WHERE id=$2",
+	s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW() WHERE id=$2",
 		models.StatusCompleted, orderID)
+	// The job is over, so its photos are: see order_photos.go. Nothing here can
+	// touch a profile picture — only files stamped with this order's id go.
+	s.purgeOnClose(o)
 	return o, nil
 }
 
@@ -971,7 +1069,9 @@ func (s *Store) setTerminal(orderID, actorID, status string) (*models.Order, err
 	}
 	o.Status = status
 	o.InviteExpiresAt = nil
-	s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL WHERE id=$2", status, orderID)
+	s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW() WHERE id=$2",
+		status, orderID)
+	s.purgeOnClose(o)
 	return o, nil
 }
 

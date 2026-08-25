@@ -1,0 +1,53 @@
+# TLS, and the headers the API needs behind it.
+#
+# Caddy gets a certificate from Let's Encrypt on first start and renews it
+# itself — nothing to schedule, nothing to remember. Point the domain's A record
+# at the server before bringing this up, or the challenge fails.
+
+{$DOMAIN} {
+	encode {
+		gzip
+		# Only what compresses. Running gzip over a JPEG spends CPU on a box that
+		# was chosen for being cheap and makes the file marginally bigger.
+		match {
+			header Content-Type text/*
+			header Content-Type application/json*
+			header Content-Type application/javascript*
+		}
+	}
+
+	request_body {
+		# A wall in front of the process, above the server's own cap so an
+		# oversized photo is refused by the API — with a message the app can
+		# show — rather than by Caddy with a bare 413. Raise both together if
+		# you raise MAX_UPLOAD_MB.
+		max_size 8MB
+	}
+
+	# 8000 is the Dockerfile's PORT. Setting PORT in .env to something else means
+	# changing it here too — compose puts nothing between these two numbers.
+	reverse_proxy api:8000 {
+		# Caddy sends X-Forwarded-Proto, -Host and -For by default, which is what
+		# lets the server build `https://…` URLs for uploaded photos. Without the
+		# proto header those URLs come back as http:// and Android refuses to
+		# load them: the upload succeeds and the avatar stays blank. If you
+		# replace Caddy with nginx, set both headers by hand.
+
+		# Never buffer. The realtime transports — WebSocket at /api/v1/ws and SSE
+		# at /api/v1/events — are long-lived responses that must reach the phone
+		# as they are written, not when a buffer happens to fill.
+		flush_interval -1
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MB
+			roll_keep 5
+		}
+	}
+}
+
+# No domain yet? Replace the block above with `:80 { … }` to serve plain HTTP.
+# Understand what it costs first: Android blocks cleartext traffic by default,
+# so the app will upload photos it can never display, and every token on the
+# platform travels in the open. It is a way to test, not a way to run.

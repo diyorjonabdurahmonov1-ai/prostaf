@@ -1,6 +1,8 @@
 package store
 
 import (
+	"log"
+
 	"prostaff/internal/id"
 	"prostaff/internal/models"
 )
@@ -52,14 +54,48 @@ func (s *Store) walletCanAccept(workerUserID string) bool {
 	return w.Balance >= w.MinBalance || w.CreditLimit > 0
 }
 
+// walletsCanAccept is walletCanAccept asked about a list of workers at once:
+// which of them could carry the commission if they answered right now.
+//
+// A worker with no wallet row is simply absent from the result, which reads as
+// false — the same answer walletCanAccept gives them. On an error every worker
+// is reported solvent rather than none: this is a filter against ringing phones
+// for nothing, and Accept still checks the balance for real before any job is
+// handed over. See busyWorkers for why that is the safe direction.
+func (s *Store) walletsCanAccept(userIDs []string) map[string]bool {
+	ok := make(map[string]bool, len(userIDs))
+	if len(userIDs) == 0 {
+		return ok
+	}
+	rows, err := s.db.Query(
+		`SELECT user_id FROM wallets
+		 WHERE user_id = ANY($1) AND (balance >= min_balance OR credit_limit > 0)`,
+		userIDs)
+	if err != nil {
+		log.Printf("store: wallet sweep failed, dispatching without it: %v", err)
+		for _, uid := range userIDs {
+			ok[uid] = true
+		}
+		return ok
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var userID string
+		if rows.Scan(&userID) == nil {
+			ok[userID] = true
+		}
+	}
+	return ok
+}
+
 // canWorkerAccept is the whole question of whether a worker may take a job:
 // either they still have one of their free trial jobs, or their wallet can carry
 // the commission.
 //
-// It reads the counter off the profile rather than the ledger, because the
-// profile was scanned with it — the dispatch path asks this about every online
-// worker in the city for every order, and a query per worker there is a query
-// per worker per twelve seconds.
+// It reads the trial counter off the profile rather than the ledger, because
+// the profile was scanned with it. This is the gate Accept actually decides on;
+// the dispatch sweep asks the same question of a whole shortlist at once and
+// never comes through here — see walletsCanAccept and candidatesFor.
 func (s *Store) canWorkerAccept(wp *models.WorkerProfile) bool {
 	if wp == nil {
 		return false

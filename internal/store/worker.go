@@ -248,6 +248,13 @@ func (s *Store) GetWorkerByUser(userID string) (*models.WorkerProfile, bool) {
 // NearbyWorkers returns bookable workers within radiusKm of a point, nearest
 // first, each carrying its distance: online, not banned, not already on a job,
 // and never the caller themselves. Per-order matchmaking goes through Matches.
+//
+// The order of the two filters is the whole cost of this function. Distance is
+// free and decides most of it; "already on a job" costs a lookup. Asking the
+// database about every online worker on the platform and then dropping most of
+// the answers on the radius is what this did, on a screen customers open far
+// more often than anyone places an order — so the radius runs first and the one
+// lookup left is asked once, for the workers that are actually nearby.
 func (s *Store) NearbyWorkers(lat, lng, radiusKm float64, excludeUserID string) []models.WorkerProfile {
 	if radiusKm <= 0 {
 		radiusKm = matchRadiusKm
@@ -256,15 +263,14 @@ func (s *Store) NearbyWorkers(lat, lng, radiusKm float64, excludeUserID string) 
 	if err != nil {
 		return []models.WorkerProfile{}
 	}
-	defer rows.Close()
 
-	out := []models.WorkerProfile{}
+	near := []models.WorkerProfile{}
 	for rows.Next() {
 		wp, err := s.scanWorker(rows)
 		if err != nil {
 			continue
 		}
-		if wp.UserID == excludeUserID || s.WorkerIsBusy(wp.UserID) {
+		if wp.UserID == excludeUserID {
 			continue
 		}
 		d := geo.DistanceKm(lat, lng, wp.Lat, wp.Lng)
@@ -273,7 +279,28 @@ func (s *Store) NearbyWorkers(lat, lng, radiusKm float64, excludeUserID string) 
 		}
 		dist := d
 		wp.DistanceKm = &dist
-		out = append(out, *wp)
+		near = append(near, *wp)
+	}
+	// Closed before the sweep below rather than deferred: a cursor holds a pool
+	// connection for as long as it is open, and querying inside one takes a
+	// second. See shortlistFor.
+	rows.Close()
+	if len(near) == 0 {
+		return near
+	}
+
+	userIDs := make([]string, len(near))
+	for i := range near {
+		userIDs[i] = near[i].UserID
+	}
+	busy := s.busyWorkers(userIDs)
+
+	out := make([]models.WorkerProfile, 0, len(near))
+	for _, wp := range near {
+		if busy[wp.UserID] {
+			continue
+		}
+		out = append(out, wp)
 	}
 	sort.Slice(out, func(i, j int) bool { return *out[i].DistanceKm < *out[j].DistanceKm })
 	return out

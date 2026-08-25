@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"prostaff/internal/atmos"
 	"prostaff/internal/config"
@@ -34,6 +35,12 @@ type Server struct {
 	// account is configured — everything then falls back to Expo, as before.
 	fcm     *fcm.Client
 	handler http.Handler
+
+	// smsBudget caps what the platform will spend on messages in an hour, and
+	// userLimit caps how fast one signed-in account may call the API. Both may
+	// be nil, which means unlimited — see ratelimit.go.
+	smsBudget *smsBudget
+	userLimit *userLimiter
 
 	// batchMu serialises dispatch within one multi-worker request — see
 	// lockBatch. Guarded by its own mutex because the map itself is shared.
@@ -79,6 +86,8 @@ func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 		hub:     hub,
 		ws:      ws.NewHub(),
 		batchMu: map[string]*sync.Mutex{},
+		smsBudget: newSMSBudget(cfg.SMSHourlyBudget, time.Hour),
+		userLimit: newUserLimiter(cfg.RateLimitPerMin),
 		atmos: atmos.New(atmos.Config{
 			BaseURL:        cfg.AtmosBaseURL,
 			CheckoutURL:    cfg.AtmosCheckoutURL,
@@ -118,6 +127,9 @@ func (s *Server) Handler() http.Handler { return s.handler }
 func (s *Server) routes() http.Handler {
 	mux := http.NewServeMux()
 	const p = "/api/v1"
+
+	// Liveness, for the container runtime and whatever watches the domain.
+	mux.HandleFunc("GET "+p+"/healthz", s.handleHealth)
 
 	// Auth (public). There is no /auth/register: an account is only ever opened
 	// through /auth/otp/verify, so every account has a proven phone behind it.

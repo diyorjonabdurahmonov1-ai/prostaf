@@ -1,0 +1,156 @@
+# PROSTAFF on a server of its own: Postgres, the API, and Caddy in front.
+#
+#   cp .env.example .env      # fill it in — DEV_MODE=false, a real JWT_SECRET
+#   echo "DOMAIN=api.prostaff.uz" >> .env
+#   docker compose up -d --build
+#
+# Caddy is the only thing holding a port on the host. The API is reachable only
+# from inside the compose network, so nothing can talk to it except through TLS.
+#
+# The two volumes are the state. `uploads` is the profile photos and order
+# photos; `pgdata` is everything else. Both have to be in the backup — a
+# `pg_dump` on its own now restores a database full of rows naming files that
+# are not there, which shows up as every avatar going blank.
+#
+# Sized for a 4 GB / 4 vCPU VPS, which is the machine this is expected to run
+# on. The numbers below add up to roughly 3 GB, leaving the rest to the kernel's
+# page cache — which on this workload is doing more for the response times than
+# any of them, because it is what keeps the photos being served out of memory
+# instead of off the disk. Two things are deliberate and worth not undoing:
+#
+#   * Every service has a memory limit. Without them the three containers share
+#     one pool, and the one that grows fastest under load — Postgres, always —
+#     takes the memory the API needed to answer the request that caused the
+#     load. The machine then kills whichever process the kernel likes least,
+#     which is not a decision worth leaving to chance.
+#   * Every service caps its logs. Docker's default json-file driver grows
+#     without limit, and an unattended server filling its disk with the logs of
+#     the thing that was working fine is a genuinely common way to lose one.
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-prostaff}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
+      POSTGRES_DB: ${DB_NAME:-prostaff}
+    # Postgres ships tuned for a machine it assumes nothing about: 128 MB of
+    # shared_buffers and a planner that believes it has no page cache. On a
+    # server with real traffic that is the difference between an index scan and
+    # a sequential one, on every query.
+    #
+    #   shared_buffers        a quarter of the box, the usual starting point
+    #   effective_cache_size  not an allocation — what the planner assumes the
+    #                         kernel is caching. Understating it is what makes
+    #                         Postgres avoid indexes it should be using.
+    #   work_mem              per sort, per query. The one number that multiplies:
+    #                         at max_connections it is the difference between
+    #                         comfortable and out of memory, hence something
+    #                         modest next to a connection cap.
+    #   max_connections       above the API's pool (DB_MAX_OPEN_CONNS, 30) with
+    #                         room left for psql and pg_dump.
+    #   random_page_cost      1.1 because the disk is SSD. The default of 4 is a
+    #                         spinning platter, and it is why a planner chooses
+    #                         to read a whole table rather than seek.
+    command:
+      - postgres
+      - -c
+      - shared_buffers=1GB
+      - -c
+      - effective_cache_size=2GB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - max_connections=60
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - wal_compression=on
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Shared memory, which is where parallel queries and large sorts go. Docker's
+    # 64 MB default is small enough that Postgres reports it as an out-of-memory
+    # error on a query that has plenty of RAM available to it.
+    shm_size: 256mb
+    mem_limit: 1800m
+    healthcheck:
+      # The API's first act is to connect and migrate, so starting it against a
+      # Postgres that is still initialising is a crash loop with a confusing log.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-prostaff} -d ${DB_NAME:-prostaff}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+  api:
+    # Built by GitHub Actions and pulled from GHCR; see .github/workflows/deploy.yml.
+    # `build:` stays so that a local `docker compose up --build` still works and
+    # tags the same name. A deploy exports IMAGE_TAG as the commit it is
+    # shipping, which is also what makes a rollback one command:
+    #
+    #   IMAGE_TAG=sha-abc123def456 docker compose up -d api
+    #
+    # Without it the tag falls back to latest, which is whatever CI pushed last.
+    image: ${IMAGE:-ghcr.io/samandarturgunboyev/prostaf}:${IMAGE_TAG:-latest}
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Inside the network the database is a service name, whatever .env says
+      # for local development.
+      DB_HOST: db
+      DB_SSLMODE: disable
+      UPLOAD_DIR: /data/uploads
+      # Go sizes its garbage collector against the machine's memory, not the
+      # container's, so without this it happily grows past the limit below and is
+      # killed for it. Set under mem_limit, leaving room for the parts of the
+      # process the GC does not manage — stacks, and the buffers behind every
+      # open WebSocket.
+      GOMEMLIMIT: 700MiB
+    volumes:
+      - uploads:/data/uploads
+      # The Firebase key, if you keep it as a file. Read-only: the server has no
+      # reason to write to a credential.
+      - ./secrets:/app/secrets:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    mem_limit: 900m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+    # No `ports:` on purpose — see the note at the top.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env, e.g. api.prostaff.uz}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and account keys. Losing this volume means asking Let's
+      # Encrypt for new certificates on every restart, which is rate-limited.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    mem_limit: 200m
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:
