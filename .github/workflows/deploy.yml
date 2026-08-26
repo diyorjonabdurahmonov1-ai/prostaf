@@ -143,12 +143,22 @@ jobs:
       - name: ssh key
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_deploy
+          # tr -d '\r' because a human pastes this secret, and a human on
+          # Windows pastes CRLF: the clipboard converts it on the way out. An
+          # OpenSSH key carrying carriage returns does not fail as a wrong key. It
+          # fails as `Load key: error in libcrypto`, ssh falls through to asking for
+          # a password, and the run ends on "Too many authentication failures" —
+          # three steps from the thing that actually went wrong.
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
           # A pinned host key, not ssh-keyscan at deploy time. Scanning trusts
           # whatever answers on the day, which is the one thing the known_hosts
           # file exists to stop.
-          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" | tr -d '\r' > ~/.ssh/known_hosts
+
+          # Fail on the key here, where the message names it, rather than on the
+          # ssh call below where it looks like the server rejected us.
+          ssh-keygen -y -f ~/.ssh/id_deploy > /dev/null
 
       - name: deploy
         run: |
