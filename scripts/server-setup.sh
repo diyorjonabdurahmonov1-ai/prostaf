@@ -282,7 +282,11 @@ fi
 
 # ── Firewall ─────────────────────────────────────────────────────
 step "firewall"
-SSH_PORT="$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')"
+# awk reads sshd -T to the end rather than stopping at the first match. With
+# `exit` it closes the pipe early, sshd is killed by SIGPIPE, and `set -o
+# pipefail` then ends the script here — silently, two thirds of the way
+# through, with the firewall half configured.
+SSH_PORT="$(sshd -T 2>/dev/null | awk '/^port /{if (!found) {print $2; found = 1}}')"
 SSH_PORT="${SSH_PORT:-22}"
 # ssh first, and before enabling. The other order locks you out of the machine
 # you are standing on.

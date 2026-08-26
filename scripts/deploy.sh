@@ -94,11 +94,23 @@ echo "deploy: api healthy"
 # warning and not a failure: a server resolving its own public domain is common
 # but not guaranteed, and that is not a reason to fail a good deploy.
 domain="$(sed -n 's/^DOMAIN=//p' .env 2>/dev/null | tr -d '"' | head -n1)"
-if [ -n "$domain" ]; then
-	if curl -fsS --max-time 10 "https://$domain/api/v1/healthz" >/dev/null 2>&1; then
-		echo "deploy: https://$domain/api/v1/healthz ok"
+# A DOMAIN of `:80` — a bare port — is Caddy serving plain http with no name to
+# reach it by, which is how a server on an IP address alone runs. There is no
+# https URL to check then, so the check goes over http on the loopback: still
+# through Caddy, so it still catches a proxy pointed at the wrong port, and it
+# does not fail every deploy with a warning about a certificate nobody asked
+# for.
+case "$domain" in
+"") url="" ;;
+:80) url="http://localhost/api/v1/healthz" ;;
+:*) url="http://localhost:${domain#:}/api/v1/healthz" ;;
+*) url="https://$domain/api/v1/healthz" ;;
+esac
+if [ -n "$url" ]; then
+	if curl -fsS --max-time 10 "$url" >/dev/null 2>&1; then
+		echo "deploy: $url ok"
 	else
-		echo "deploy: WARNING — the container is healthy but https://$domain/api/v1/healthz did not answer" >&2
+		echo "deploy: WARNING — the container is healthy but $url did not answer" >&2
 	fi
 fi
 
