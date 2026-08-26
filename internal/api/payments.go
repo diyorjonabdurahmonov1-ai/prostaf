@@ -297,11 +297,24 @@ func (s *Server) handleListPayments(w http.ResponseWriter, r *http.Request) {
 // finds nothing pending, at which point the honest answer is still "OK" — the
 // payment *is* settled, which is what the gateway is asking about.
 func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
+	// Logged on every callback, not only rejected ones, because it is the answer
+	// to the question ATMOS_CALLBACK_IPS asks: you cannot set an allowlist
+	// correctly until you have seen what address callbacks actually arrive from
+	// on this deployment — which depends on what sits in front of the process.
+	src := callbackSourceIP(r)
+	if !s.callbackAllowed(src) {
+		log.Printf("atmos: refused callback from %q (not in ATMOS_CALLBACK_IPS)", src)
+		writeJSON(w, http.StatusOK, map[string]any{"status": 0, "message": "Forbidden"})
+		return
+	}
 	cb, ok := readAtmosCallback(r)
 	if !ok {
+		log.Printf("atmos: unreadable callback from %q", src)
 		writeJSON(w, http.StatusOK, map[string]any{"status": 0, "message": "Bad request"})
 		return
 	}
+	log.Printf("atmos: callback from %q for transaction %q invoice %q amount %q",
+		src, cb.TransactionID, cb.Invoice, cb.Amount)
 	if !s.atmos.VerifyCallback(cb) {
 		log.Printf("atmos: rejected callback for transaction %q: bad signature", cb.TransactionID)
 		// Written onto the payment so the office can see why somebody's money
@@ -319,12 +332,33 @@ func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
 
 	payment, settled := s.store.SettlePayment(cb.TransactionID)
 	if !settled {
-		// Either a retry of one already handled, or a transaction this server
-		// never opened. Both are "nothing to do"; only the second is odd.
-		if _, known := s.store.GetPaymentByExternalID(cb.TransactionID); !known {
+		// Nothing moved, and which of the three reasons it was decides what
+		// Atmos is told — because this answer is not a receipt, it is an
+		// instruction. Atmos debits the card *after* reading `status: 1` here,
+		// so saying 1 about a payment this server cannot credit is asking for
+		// somebody's money on behalf of nobody.
+		existing, known := s.store.GetPaymentByExternalID(cb.TransactionID)
+		switch {
+		case known && existing.Status == models.PaymentSuccess:
+			// A retry of one already handled. Atmos repeats a callback it did
+			// not get a clean answer to, and the honest answer is still yes:
+			// the payment is settled, which is what it is asking about.
+			writeJSON(w, http.StatusOK, map[string]any{"status": 1, "message": "Muvaffaqiyatli"})
+		case known:
+			// Known, but dead — failed to open, or canceled. Confirming it would
+			// charge a card for a purchase this server has already written off.
+			log.Printf("atmos: refusing callback for %s payment %s (transaction %q)",
+				existing.Status, existing.ID, cb.TransactionID)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": 0, "message": "To'lov bekor qilingan yoki yakunlanmagan."})
+		default:
+			// A transaction this server never opened. The documented answer is a
+			// refusal, and it is the right one twice over: nothing here could be
+			// credited, so a yes would take money that lands nowhere.
 			log.Printf("atmos: callback for unknown transaction %q", cb.TransactionID)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"status": 0, "message": "Invoys tizimda mavjud emas."})
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"status": 1, "message": "OK"})
 		return
 	}
 
@@ -342,7 +376,7 @@ func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.applyPayment(payment)
-	writeJSON(w, http.StatusOK, map[string]any{"status": 1, "message": "OK"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": 1, "message": "Muvaffaqiyatli"})
 }
 
 // readAtmosCallback parses a callback sent either as JSON or as an HTML form.

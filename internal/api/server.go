@@ -5,6 +5,7 @@ package api
 import (
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -30,6 +31,9 @@ type Server struct {
 	// itself disabled, which is what keeps development working without a
 	// merchant account.
 	atmos *atmos.Client
+	// atmosCallbackNets is ATMOS_CALLBACK_IPS parsed once at start-up rather
+	// than per callback. Empty means no address check — see callbackAllowed.
+	atmosCallbackNets []*net.IPNet
 	// fcm sends push straight to Firebase, which is the only way a notification
 	// reaches an Android phone whose app process is gone. Nil when no service
 	// account is configured — everything then falls back to Expo, as before.
@@ -81,11 +85,11 @@ func (s *Server) lockBatch(batchID string) func() {
 // NewServer builds a Server with all routes and middleware wired.
 func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 	s := &Server{
-		cfg:     cfg,
-		store:   st,
-		hub:     hub,
-		ws:      ws.NewHub(),
-		batchMu: map[string]*sync.Mutex{},
+		cfg:       cfg,
+		store:     st,
+		hub:       hub,
+		ws:        ws.NewHub(),
+		batchMu:   map[string]*sync.Mutex{},
 		smsBudget: newSMSBudget(cfg.SMSHourlyBudget, time.Hour),
 		userLimit: newUserLimiter(cfg.RateLimitPerMin),
 		atmos: atmos.New(atmos.Config{
@@ -98,6 +102,7 @@ func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 			APIKey:         cfg.AtmosAPIKey,
 			RedirectURL:    cfg.AtmosRedirectURL,
 		}),
+		atmosCallbackNets: parseCIDRs(cfg.AtmosCallbackIPs),
 	}
 	// A token Expo reports as dead is dropped, so the next order does not queue
 	// a push at a device that has not existed since the app was uninstalled.

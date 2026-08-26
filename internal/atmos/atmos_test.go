@@ -14,7 +14,7 @@ func testClient() *Client {
 		ConsumerSecret: "secret",
 		StoreID:        "1234",
 		APIKey:         "merchant-api-key",
-		RedirectURL:    "prostaff://wallet",
+		RedirectURL:    "ishtopish://wallet",
 	})
 }
 
@@ -102,7 +102,7 @@ func TestAmountSom(t *testing.T) {
 func TestInvoiceURL(t *testing.T) {
 	c := testClient()
 	got := c.InvoiceURL("987654")
-	want := "https://checkout.example/invoice/get?redirectLink=prostaff%3A%2F%2Fwallet&storeId=1234&transactionId=987654"
+	want := "https://checkout.example/invoice/get?redirectLink=ishtopish%3A%2F%2Fwallet&storeId=1234&transactionId=987654"
 	if got != want {
 		t.Errorf("InvoiceURL =\n  %s\nwant\n  %s", got, want)
 	}
@@ -119,5 +119,28 @@ func TestEnabled(t *testing.T) {
 	}
 	if _, err := New(Config{}).CreateTransaction(context.Background(), 10000, "p1"); err == nil {
 		t.Error("CreateTransaction on a disabled client must fail")
+	}
+}
+
+// The configuration that must never count as working: everything needed to
+// take money, and nothing needed to recognise the confirmation that it moved.
+//
+// It is worth a test of its own because it is the shape a half-finished
+// merchant onboarding naturally produces — the store id and API credentials
+// arrive first, and the callback key is issued separately, later.
+func TestEnabledRequiresCallbackKey(t *testing.T) {
+	cfg := Config{
+		BaseURL:        "https://apigw.atmos.uz",
+		ConsumerKey:    "key",
+		ConsumerSecret: "secret",
+		StoreID:        "11100",
+	}
+	if cfg.Enabled() {
+		t.Error("a gateway with no callback key must not report itself enabled: " +
+			"it would charge cards and credit nobody")
+	}
+	cfg.APIKey = "merchant-api-key"
+	if !cfg.Enabled() {
+		t.Error("with the callback key present the gateway must be enabled")
 	}
 }

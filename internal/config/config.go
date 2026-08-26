@@ -136,6 +136,18 @@ type Config struct {
 	AtmosAPIKey string
 	// AtmosRedirectURL is the deep link Atmos returns the payer's browser to.
 	AtmosRedirectURL string
+	// AtmosCallbackIPs optionally narrows who may post a callback, as a
+	// comma-separated list of CIDRs. Atmos documents its own range as
+	// 92.63.207.0/24 and asks merchants to accept only it.
+	//
+	// Empty means "anyone may post", which is not the hole it sounds like: the
+	// signature is the control that actually protects the endpoint, and it is
+	// checked either way. This is a second lock, and it is off by default
+	// because a wrong entry here is worse than no entry — it would refuse the
+	// real gateway silently, and the symptom is money that moves at Atmos and
+	// never arrives. Turn it on once the log has shown you the address that
+	// callbacks genuinely come from.
+	AtmosCallbackIPs string
 
 	// Firebase Cloud Messaging, for push that survives the app being closed.
 	//
@@ -226,6 +238,7 @@ func Load() Config {
 		AtmosTerminalID:     env("ATMOS_TERMINAL_ID", ""),
 		AtmosAPIKey:         env("ATMOS_API_KEY", ""),
 		AtmosRedirectURL:    env("ATMOS_REDIRECT_URL", ""),
+		AtmosCallbackIPs:    env("ATMOS_CALLBACK_IPS", ""),
 
 		FCMServiceAccountFile: env("FCM_SERVICE_ACCOUNT_FILE", ""),
 		FCMServiceAccountJSON: env("FCM_SERVICE_ACCOUNT_JSON", ""),

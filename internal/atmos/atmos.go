@@ -15,17 +15,27 @@
 // Everything in this file is the outbound half: get a token, open a
 // transaction, build the URL to send somebody to.
 //
-// # Verify against the merchant docs before going live
+// # Checked against docs.atmos.uz
 //
-// Atmos publishes its paths, field names and signature recipe per merchant
-// account, and they are all configurable (ATMOS_* in .env) rather than compiled
-// in for exactly that reason. The defaults below are the common shape of the
-// API; the four things to confirm against your own documentation are:
+// This is the flow the documentation calls "To'lov sahifasi", which it
+// recommends for mobile apps: call /merchant/pay/create for a draft
+// transaction, then send the payer to the hosted page with storeId,
+// transactionId and an optional redirectLink. These match the published spec:
 //
-//   - the token, create and checkout paths (ATMOS_BASE_URL, ATMOS_CHECKOUT_URL)
-//   - that amounts are sent in tiyin (this package converts from so'm)
-//   - the callback field names and the order they are hashed in (Signature)
-//   - whether your account uses `terminal_id` in addition to `store_id`
+//   - POST {base}/token, Basic consumer-key:consumer-secret, client_credentials
+//   - POST {base}/merchant/pay/create with amount in tiyin, account, store_id
+//   - the page at {checkout}?storeId=…&transactionId=…&redirectLink=…
+//     — test-checkout.pays.uz in the sandbox, checkout.pays.uz live
+//   - sign = hash of store_id+transaction_id+invoice+amount+api_key, joined
+//     with no separators, in that order
+//
+// Two things the documentation does not settle, both configurable rather than
+// guessed at here:
+//
+//   - It names the concatenation but not the hash. MD5 is what Atmos
+//     integrations use and what Signature computes; if callbacks are rejected
+//     with everything else correct, this is the thing to ask the cabinet about.
+//   - `terminal_id` is only sent by accounts that were issued one.
 //
 // Getting one of these wrong fails loudly at the first real payment rather than
 // silently mis-crediting anybody: a create call that is refused returns an
@@ -70,11 +80,20 @@ type Config struct {
 	RedirectURL string
 }
 
-// Enabled reports whether enough is configured to talk to Atmos at all. With it
-// false the server runs exactly as it did before — useful in development, where
-// DEV_MODE credits top-ups directly.
+// Enabled reports whether enough is configured to take money *and account for
+// it*. With it false the server runs exactly as it did before — useful in
+// development, where DEV_MODE credits top-ups directly.
+//
+// APIKey is in this list even though nothing outbound needs it, and that is the
+// point. Without it every callback fails its signature check, so a server
+// configured with everything *except* the merchant key is the one arrangement
+// that is worse than having no gateway at all: it opens real transactions, it
+// sends real people to a real card form, and then it credits nobody, for ever,
+// silently. Refusing to call that "enabled" turns a catastrophe into an
+// obvious, harmless "payments are not set up yet".
 func (c Config) Enabled() bool {
-	return c.BaseURL != "" && c.ConsumerKey != "" && c.ConsumerSecret != "" && c.StoreID != ""
+	return c.BaseURL != "" && c.ConsumerKey != "" && c.ConsumerSecret != "" &&
+		c.StoreID != "" && c.APIKey != ""
 }
 
 // Client is a configured Atmos merchant client. Safe for concurrent use: the
@@ -166,7 +185,7 @@ type Transaction struct {
 }
 
 type createResponse struct {
-	TransactionID json.Number `json:"transaction_id"`
+	TransactionID    json.Number `json:"transaction_id"`
 	StoreTransaction *struct {
 		TransactionID json.Number `json:"trans_id"`
 	} `json:"store_transaction"`
