@@ -143,21 +143,25 @@ jobs:
       - name: ssh key
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # tr -d '\r' because a human pastes this secret, and a human on
-          # Windows pastes CRLF: the clipboard converts it on the way out. An
-          # OpenSSH key carrying carriage returns does not fail as a wrong key. It
-          # fails as `Load key: error in libcrypto`, ssh falls through to asking for
-          # a password, and the run ends on "Too many authentication failures" —
-          # three steps from the thing that actually went wrong.
-          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '\r' > ~/.ssh/id_deploy
+          # SSH_PRIVATE_KEY is base64, not the key itself. The key is pasted into
+          # the secret by hand, and a private key is the worst possible shape for
+          # that: it is multi-line, and whitespace inside it is load-bearing. A
+          # Windows clipboard turns the line endings into CRLF, and OpenSSH then
+          # refuses the key with `Load key: error in libcrypto` — which reads like
+          # a wrong key, not a reformatted one. Base64 is one line of [A-Za-z0-9+/=]
+          # with nothing in it left for a clipboard to change, and the tr below
+          # removes any whitespace a paste added around it anyway.
+          #
+          #   base64 -w0 < ci_deploy_key      # what to paste into the secret
+          printf '%s' "${{ secrets.SSH_PRIVATE_KEY }}" | tr -d '[:space:]' | base64 -d > ~/.ssh/id_deploy
           chmod 600 ~/.ssh/id_deploy
           # A pinned host key, not ssh-keyscan at deploy time. Scanning trusts
           # whatever answers on the day, which is the one thing the known_hosts
           # file exists to stop.
-          printf '%s\n' "${{ secrets.SSH_KNOWN_HOSTS }}" | tr -d '\r' > ~/.ssh/known_hosts
+          printf '%s' "${{ secrets.SSH_KNOWN_HOSTS }}" | tr -d '\r' > ~/.ssh/known_hosts
 
-          # Fail on the key here, where the message names it, rather than on the
-          # ssh call below where it looks like the server rejected us.
+          # Fail on the key here, where the message still names it, rather than on
+          # the ssh call below where it looks like the server rejected us.
           ssh-keygen -y -f ~/.ssh/id_deploy > /dev/null
 
       - name: deploy
