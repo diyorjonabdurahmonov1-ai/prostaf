@@ -215,6 +215,11 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/wallet/topup", s.authed(s.handleTopup))
 	mux.HandleFunc("GET "+p+"/payments", s.authed(s.handleListPayments))
 	mux.HandleFunc("GET "+p+"/payments/{id}", s.authed(s.handleGetPayment))
+	// Paying a payment with a card the app collected, instead of at a page on
+	// the gateway. See payments_card.go for why that page is not used.
+	mux.HandleFunc("POST "+p+"/payments/{id}/card", s.authed(s.handlePaymentCard))
+	mux.HandleFunc("POST "+p+"/payments/{id}/otp", s.authed(s.handlePaymentOTP))
+	mux.HandleFunc("POST "+p+"/payments/{id}/resend-otp", s.authed(s.handlePaymentResendOTP))
 	// A firm buys its own months off a tariff card. The prices come from the
 	// server so the number the firm agrees to is the number it is charged.
 	mux.HandleFunc("GET "+p+"/company/subscription/plans", s.authed(s.handleSubscriptionPlans))

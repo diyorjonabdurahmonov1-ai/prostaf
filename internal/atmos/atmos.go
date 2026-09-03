@@ -208,39 +208,20 @@ func (c *Client) CreateTransaction(ctx context.Context, amountSom int64, account
 	if amountSom <= 0 {
 		return nil, fmt.Errorf("atmos: amount must be positive")
 	}
-	token, err := c.accessToken(ctx)
-	if err != nil {
-		return nil, err
-	}
-
 	// Atmos counts in tiyin; the rest of this application counts in whole so'm.
 	payload := map[string]any{
 		"amount":   amountSom * 100,
 		"account":  account,
-		"store_id": c.cfg.StoreID,
+		"store_id": c.storeID(),
 		"lang":     "uz",
 	}
 	if c.cfg.TerminalID != "" {
 		payload["terminal_id"] = c.cfg.TerminalID
 	}
-	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.cfg.BaseURL+"/merchant/pay/create", bytes.NewReader(body))
+	raw, err := c.post(ctx, "/merchant/pay/create", payload)
 	if err != nil {
 		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-
-	res, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer res.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("atmos: create: http %d: %s", res.StatusCode, snippet(raw))
 	}
 
 	var cr createResponse
@@ -278,6 +259,279 @@ func (c *Client) InvoiceURL(transactionID string) string {
 		sep = "&"
 	}
 	return base + sep + q.Encode()
+}
+
+// ---- Direct card payment ----------------------------------------------------
+
+// APIError is Atmos refusing something, as opposed to the network failing to
+// reach it. The two need telling apart at the call site: a refusal has a reason
+// worth showing the payer ("card expired", "wrong code"), while a transport
+// failure has nothing to say to them and everything to say to the log.
+type APIError struct {
+	Op          string
+	Code        string
+	Description string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("atmos: %s refused (code %s): %s", e.Op, e.Code, e.Description)
+}
+
+// Message is what a payer can usefully be shown. Atmos writes these for
+// cardholders — "insufficient funds", "wrong code" — so passing one through
+// beats replacing it with a sentence of ours that says less.
+func (e *APIError) Message() string {
+	if d := strings.TrimSpace(e.Description); d != "" {
+		return d
+	}
+	return "To'lov tizimi so'rovni rad etdi."
+}
+
+// apiResult is the status envelope every merchant/pay/* response carries.
+type apiResult struct {
+	Result struct {
+		Code        string `json:"code"`
+		Description string `json:"description"`
+	} `json:"result"`
+}
+
+// ok reports success. Atmos answers HTTP 200 to refusals as well as successes
+// and puts the verdict in the body, so the status line alone is not evidence
+// that anything happened.
+func (r apiResult) ok() bool { return strings.EqualFold(r.Result.Code, "OK") }
+
+// PreApply hands Atmos the card and asks it to text the cardholder a code.
+//
+// Nothing is debited here. The card number is passed through and not retained:
+// it is a parameter on the way to Atmos, never a field on a struct this server
+// keeps, and never anything the logs see.
+//
+// `expiry` is Atmos's YYmm — use NormalizeExpiry on whatever the app collected.
+func (c *Client) PreApply(ctx context.Context, transactionID, cardNumber, expiry string) error {
+	if !c.Enabled() {
+		return fmt.Errorf("atmos: not configured")
+	}
+	if transactionID == "" || cardNumber == "" || expiry == "" {
+		return fmt.Errorf("atmos: pre-apply: transaction, card and expiry are all required")
+	}
+	raw, err := c.post(ctx, "/merchant/pay/pre-apply", map[string]any{
+		"card_number":    cardNumber,
+		"expiry":         expiry,
+		"store_id":       c.storeID(),
+		"transaction_id": numeric(transactionID),
+	})
+	if err != nil {
+		return err
+	}
+	var res apiResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return fmt.Errorf("atmos: pre-apply: unexpected response: %s", snippet(raw))
+	}
+	if !res.ok() {
+		return &APIError{Op: "pre-apply", Code: res.Result.Code, Description: res.Result.Description}
+	}
+	return nil
+}
+
+// Payment is a transaction Atmos has confirmed and debited.
+type Payment struct {
+	// TransactionID is the id the callback for this payment will arrive under,
+	// so it stays the key everything is matched on.
+	TransactionID string
+	// AmountTiyin is what Atmos says it actually took, which is the figure to
+	// check against what was asked for.
+	AmountTiyin int64
+	// Confirmed is Atmos's own verdict. Checked as well as the result code,
+	// because "no errors" and "the money moved" are not the same claim.
+	Confirmed bool
+	// OFDURL is the fiscal receipt, when the account is set up to issue one.
+	OFDURL string
+}
+
+type applyResponse struct {
+	apiResult
+	StoreTransaction *struct {
+		TransID   json.Number `json:"trans_id"`
+		Amount    json.Number `json:"amount"`
+		Confirmed bool        `json:"confirmed"`
+	} `json:"store_transaction"`
+	OFDURL string `json:"ofd_url"`
+}
+
+// Apply confirms the transaction with the code the cardholder was sent, and is
+// the call that actually moves the money.
+//
+// A transaction that comes back unconfirmed is an error even when the result
+// code says OK: crediting a wallet on the strength of a reply that never
+// claimed the card was debited is the one mistake this whole file exists to
+// avoid.
+func (c *Client) Apply(ctx context.Context, transactionID, otp string) (*Payment, error) {
+	if !c.Enabled() {
+		return nil, fmt.Errorf("atmos: not configured")
+	}
+	if transactionID == "" || otp == "" {
+		return nil, fmt.Errorf("atmos: apply: transaction and otp are both required")
+	}
+	raw, err := c.post(ctx, "/merchant/pay/apply", map[string]any{
+		"transaction_id": numeric(transactionID),
+		"otp":            numeric(otp),
+		"store_id":       c.storeID(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	var res applyResponse
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return nil, fmt.Errorf("atmos: apply: unexpected response: %s", snippet(raw))
+	}
+	if !res.ok() {
+		return nil, &APIError{Op: "apply", Code: res.Result.Code, Description: res.Result.Description}
+	}
+	if res.StoreTransaction == nil || !res.StoreTransaction.Confirmed {
+		return nil, &APIError{
+			Op:          "apply",
+			Code:        res.Result.Code,
+			Description: "To'lov tasdiqlanmadi. Qaytadan urinib ko'ring.",
+		}
+	}
+	amount, _ := res.StoreTransaction.Amount.Int64()
+	id := res.StoreTransaction.TransID.String()
+	if id == "" || id == "0" {
+		id = transactionID
+	}
+	return &Payment{
+		TransactionID: id,
+		AmountTiyin:   amount,
+		Confirmed:     true,
+		OFDURL:        res.OFDURL,
+	}, nil
+}
+
+// RetryOTP asks Atmos to text the code again.
+//
+// Only meaningful for a transaction pre-applied with a card number: one
+// pre-applied with a saved card token was never sent a code to begin with.
+func (c *Client) RetryOTP(ctx context.Context, transactionID string) error {
+	if !c.Enabled() {
+		return fmt.Errorf("atmos: not configured")
+	}
+	if transactionID == "" {
+		return fmt.Errorf("atmos: retry-otp: transaction is required")
+	}
+	raw, err := c.post(ctx, "/merchant/pay/retry-otp", map[string]any{
+		"store_id":       c.storeID(),
+		"transaction_id": numeric(transactionID),
+	})
+	if err != nil {
+		return err
+	}
+	var res apiResult
+	if err := json.Unmarshal(raw, &res); err != nil {
+		return fmt.Errorf("atmos: retry-otp: unexpected response: %s", snippet(raw))
+	}
+	if !res.ok() {
+		return &APIError{Op: "retry-otp", Code: res.Result.Code, Description: res.Result.Description}
+	}
+	return nil
+}
+
+// NormalizeExpiry turns what a card form collects into the YYmm Atmos wants.
+//
+// Accepts "MM/YY", "MM/YYYY", "MMYY" and YYmm itself, because a card prints
+// MM/YY and that is what people type, while the API wants the halves the other
+// way round. Getting this backwards is a payment refused for a card that was
+// perfectly good, so it is decided here once rather than at each caller.
+func NormalizeExpiry(s string) (string, bool) {
+	digits := make([]rune, 0, 6)
+	for _, r := range s {
+		if r >= '0' && r <= '9' {
+			digits = append(digits, r)
+		}
+	}
+	switch len(digits) {
+	case 4:
+		// Ambiguous on its face: "0128" is January 2028 read as MMYY and August
+		// 2001 read as YYmm. Only one of the two halves can be a month, and a
+		// card that expired in 2001 is not the one somebody is paying with, so
+		// a valid leading month wins.
+		mm, yy := string(digits[:2]), string(digits[2:])
+		if isMonth(mm) {
+			return yy + mm, true
+		}
+		if isMonth(yy) {
+			return mm + yy, true
+		}
+		return "", false
+	case 6:
+		// MM/YYYY — drop the century.
+		mm, yyyy := string(digits[:2]), string(digits[2:])
+		if !isMonth(mm) {
+			return "", false
+		}
+		return yyyy[2:] + mm, true
+	default:
+		return "", false
+	}
+}
+
+func isMonth(s string) bool {
+	n, err := strconv.Atoi(s)
+	return err == nil && n >= 1 && n <= 12
+}
+
+// ---- Transport --------------------------------------------------------------
+
+// post sends an authenticated JSON request and returns the raw body.
+//
+// Every merchant call is this same shape, and the bodies carry card data on the
+// way out and cardholder detail on the way back, so there is exactly one place
+// that touches them — one place to be careful about, and one place that can
+// never accidentally grow a log line.
+func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, error) {
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.cfg.BaseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	res, err := c.http.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("atmos: %s: http %d: %s", strings.TrimPrefix(path, "/"),
+			res.StatusCode, snippet(raw))
+	}
+	return raw, nil
+}
+
+// storeID renders the configured store the way the documented examples do — as
+// a number — while still working for an account whose id is not one.
+func (c *Client) storeID() any { return numeric(c.cfg.StoreID) }
+
+// numeric sends a digit string as a JSON number, and anything else as a string.
+//
+// The documentation's examples are all numbers (`"store_id": 11100`), and the
+// gateway has been seen to accept strings too, but only the documented shape is
+// promised — so send that whenever the value allows it.
+func numeric(s string) any {
+	s = strings.TrimSpace(s)
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return n
+	}
+	return s
 }
 
 // ---- Callback ---------------------------------------------------------------

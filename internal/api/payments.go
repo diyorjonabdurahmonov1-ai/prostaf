@@ -67,8 +67,13 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"payment":     payment,
+		"ok":      true,
+		"payment": payment,
+		// The app collects the card itself and drives /card and /otp from here.
+		// See payments_card.go for why the hosted page is no longer used.
+		"card_required": true,
+		// Still sent for installs built before the card flow existed. Those
+		// builds have no other path, and the field costs nothing to keep.
 		"payment_url": payment.PayURL,
 	})
 }
@@ -145,10 +150,11 @@ func (s *Server) handleCompanySubscriptionCheckout(w http.ResponseWriter, r *htt
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"payment":     payment,
-		"payment_url": payment.PayURL,
-		"company":     cp,
+		"ok":            true,
+		"payment":       payment,
+		"card_required": true,
+		"payment_url":   payment.PayURL,
+		"company":       cp,
 	})
 }
 

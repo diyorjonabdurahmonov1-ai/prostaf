@@ -120,8 +120,10 @@ func TestCreateTransactionRoundTrip(t *testing.T) {
 	if got := body["account"]; got != "payment-abc" {
 		t.Errorf("account = %v, want the payment id", got)
 	}
-	if got := body["store_id"]; got != "1234" {
-		t.Errorf("store_id = %v, want 1234", got)
+	// A number, not a string: every example in the documentation writes it that
+	// way, and it is the shape the live gateway was checked against.
+	if got, ok := body["store_id"].(float64); !ok || got != 1234 {
+		t.Errorf("store_id = %#v, want the number 1234", body["store_id"])
 	}
 	// Accounts without a terminal must not send an empty one: a blank field is
 	// not the same as an absent field to a payment gateway.
