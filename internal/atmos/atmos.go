@@ -288,10 +288,21 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("atmos: %s refused (code %s): %s", e.Op, e.Code, e.Description)
 }
 
-// Message is what a payer can usefully be shown. Atmos writes these for
-// cardholders — "insufficient funds", "wrong code" — so passing one through
-// beats replacing it with a sentence of ours that says less.
+// Message is what a payer can usefully be shown.
+//
+// The code is consulted first — see messages.go. Atmos's own descriptions are
+// Russian, and its commonest one ("Карта не найдена") tells a payer their card
+// is missing when what is actually wrong is a mistyped digit or expiry, so for
+// the codes that a cardholder can act on there is a better sentence to give
+// them.
+//
+// Anything not in that table keeps Atmos's wording. An unanticipated refusal is
+// more use in the gateway's own words, however awkward, than flattened into
+// "something went wrong": the payer can read it out, and support can look it up.
 func (e *APIError) Message() string {
+	if m := payerMessage(e.Code); m != "" {
+		return m
+	}
 	if d := strings.TrimSpace(e.Description); d != "" {
 		return d
 	}

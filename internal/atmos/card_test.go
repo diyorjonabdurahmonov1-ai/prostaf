@@ -117,7 +117,10 @@ func TestPreApplySendsDocumentedShape(t *testing.T) {
 // wallet gets credited for money that never moved.
 func TestPreApplyRefusalIsAnError(t *testing.T) {
 	f := newFakeCardAtmos(t)
-	f.preApply = `{"result":{"code":"STPIMS-ERR-092","description":"Karta muddati tugagan"}}`
+	// An unmapped code on purpose. A refusal Atmos has a better sentence for
+	// than we do keeps its own words; the mapped codes, where our wording says
+	// more than the Russian Atmos sends, are covered in messages_test.go.
+	f.preApply = `{"result":{"code":"STPIMS-ERR-145","description":"Karta muddati tugagan"}}`
 
 	err := f.client().PreApply(context.Background(), "257000", "8600490000000000", "2801")
 	if err == nil {
@@ -127,8 +130,6 @@ func TestPreApplyRefusalIsAnError(t *testing.T) {
 	if !errors.As(err, &refusal) {
 		t.Fatalf("PreApply: error is %T, want *APIError", err)
 	}
-	// The payer sees Atmos's own sentence rather than one of ours: it says more,
-	// and it is written for cardholders.
 	if refusal.Message() != "Karta muddati tugagan" {
 		t.Errorf("Message() = %q", refusal.Message())
 	}
