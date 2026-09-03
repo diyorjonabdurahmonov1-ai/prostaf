@@ -32,6 +32,8 @@ func main() {
 		TerminalID:     cfg.AtmosTerminalID,
 		APIKey:         cfg.AtmosAPIKey,
 		RedirectURL:    cfg.AtmosRedirectURL,
+		MPSAPIKey:      cfg.AtmosMPSAPIKey,
+		MPSStoreID:     cfg.AtmosMPSStoreID,
 	})
 
 	fmt.Printf("base_url      %s\n", cfg.AtmosBaseURL)
@@ -44,8 +46,19 @@ func main() {
 	fmt.Printf("redirect_url  %s\n", cfg.AtmosRedirectURL)
 	fmt.Printf("callback_ips  %s\n", orNone(cfg.AtmosCallbackIPs))
 	fmt.Printf("dev_mode      %v\n", cfg.DevMode)
-	fmt.Printf("ENABLED       %v\n", c.Enabled())
+	fmt.Printf("mps_api_key   %s\n", mask(cfg.AtmosMPSAPIKey))
+	fmt.Printf("mps_store_id  %q (empty reuses store_id)\n", cfg.AtmosMPSStoreID)
+	fmt.Printf("ENABLED       %v  (UzCard / Humo)\n", c.Enabled())
+	fmt.Printf("MPS ENABLED   %v  (Visa / Mastercard)\n", c.MPSEnabled())
 	fmt.Printf("sample payurl %s\n", c.InvoiceURL("123456"))
+
+	if c.Enabled() && !c.MPSEnabled() {
+		fmt.Println("\nVisa and Mastercard are OFF. Those cards go through Atmos's MPS")
+		fmt.Println("module, which is applied for separately and carries a key of its own —")
+		fmt.Println("set ATMOS_MPS_API_KEY. Until then an international card is refused with")
+		fmt.Println("a sentence saying so, rather than by the merchant API answering \"Karta")
+		fmt.Println("topilmadi\" about a card that is perfectly good.")
+	}
 
 	if !c.Enabled() {
 		fmt.Println("\nGateway OFF — payments take the DEV_MODE path instead. Missing:")

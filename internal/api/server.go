@@ -101,6 +101,8 @@ func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 			TerminalID:     cfg.AtmosTerminalID,
 			APIKey:         cfg.AtmosAPIKey,
 			RedirectURL:    cfg.AtmosRedirectURL,
+			MPSAPIKey:      cfg.AtmosMPSAPIKey,
+			MPSStoreID:     cfg.AtmosMPSStoreID,
 		}),
 		atmosCallbackNets: parseCIDRs(cfg.AtmosCallbackIPs),
 	}
@@ -219,6 +221,10 @@ func (s *Server) routes() http.Handler {
 	// the gateway. See payments_card.go for why that page is not used.
 	mux.HandleFunc("POST "+p+"/payments/{id}/card", s.authed(s.handlePaymentCard))
 	mux.HandleFunc("POST "+p+"/payments/{id}/otp", s.authed(s.handlePaymentOTP))
+	// The Visa/Mastercard counterpart of /otp: the payer has been through 3DS
+	// at their own bank and the transaction can be captured. See
+	// payments_card.go for why the two gateways cannot share one endpoint.
+	mux.HandleFunc("POST "+p+"/payments/{id}/confirm", s.authed(s.handlePaymentConfirm))
 	mux.HandleFunc("POST "+p+"/payments/{id}/resend-otp", s.authed(s.handlePaymentResendOTP))
 	// A firm buys its own months off a tariff card. The prices come from the
 	// server so the number the firm agrees to is the number it is charged.

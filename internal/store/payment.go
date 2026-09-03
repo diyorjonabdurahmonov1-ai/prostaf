@@ -115,6 +115,27 @@ func (s *Store) AttachExternalID(paymentID, externalID string) error {
 	return nil
 }
 
+// SetPaymentProvider records which of Atmos's two gateways a payment is being
+// settled through, once the card number has decided it.
+//
+// It is written down rather than inferred because the two are confirmed
+// differently and cannot be told apart afterwards: a local card is finished
+// with an SMS code and an international one with a 3DS page, and by the time
+// the payer comes back to confirm, the card number that decided it is long gone
+// — never stored, which is the whole point. Without this the confirm step would
+// have to guess, and guessing wrong sends somebody to type a code that was
+// never sent to them.
+func (s *Store) SetPaymentProvider(paymentID, provider string) error {
+	res, err := s.db.Exec("UPDATE payments SET provider=$1 WHERE id=$2", provider, paymentID)
+	if err != nil {
+		return ErrConflict
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // GetPayment returns one payment. Used by the app to ask "did my money land?"
 // after coming back from the invoice page — the browser returning proves
 // nothing, only the callback does.

@@ -148,6 +148,18 @@ type Config struct {
 	// never arrives. Turn it on once the log has shown you the address that
 	// callbacks genuinely come from.
 	AtmosCallbackIPs string
+	// AtmosMPSAPIKey turns on Visa and Mastercard, which Atmos settles through a
+	// separate module (/mps) with a key of its own — a third secret, neither the
+	// consumer secret nor the callback key, issued when MPS is applied for.
+	//
+	// While it is empty only UzCard and Humo are accepted and an international
+	// card is refused up front with a sentence saying why. That is deliberate:
+	// the merchant API's own answer to a Visa number is "Karta topilmadi", which
+	// sends a payer looking for a mistake in a card that is perfectly good.
+	AtmosMPSAPIKey string
+	// AtmosMPSStoreID is only for accounts issued a distinct store id for MPS.
+	// Empty reuses ATMOS_STORE_ID, which is how Atmos sets most accounts up.
+	AtmosMPSStoreID string
 
 	// Firebase Cloud Messaging, for push that survives the app being closed.
 	//
@@ -239,6 +251,8 @@ func Load() Config {
 		AtmosAPIKey:         env("ATMOS_API_KEY", ""),
 		AtmosRedirectURL:    env("ATMOS_REDIRECT_URL", ""),
 		AtmosCallbackIPs:    env("ATMOS_CALLBACK_IPS", ""),
+		AtmosMPSAPIKey:      env("ATMOS_MPS_API_KEY", ""),
+		AtmosMPSStoreID:     env("ATMOS_MPS_STORE_ID", ""),
 
 		FCMServiceAccountFile: env("FCM_SERVICE_ACCOUNT_FILE", ""),
 		FCMServiceAccountJSON: env("FCM_SERVICE_ACCOUNT_JSON", ""),

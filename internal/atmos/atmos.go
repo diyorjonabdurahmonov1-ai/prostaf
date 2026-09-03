@@ -78,6 +78,17 @@ type Config struct {
 	// RedirectURL is where Atmos sends the payer's browser once the invoice page
 	// is done. A deep link back into the app; empty leaves them on Atmos's page.
 	RedirectURL string
+
+	// MPSAPIKey turns on Visa and Mastercard — see mps.go. It is a third
+	// secret, separate from both ConsumerSecret and APIKey, issued when the MPS
+	// module is applied for. Empty means the account has merchant-API access
+	// only, which is the ordinary case: local cards work and international ones
+	// are refused with a sentence saying why, rather than with "Karta topilmadi"
+	// from a processing the card was never in.
+	MPSAPIKey string
+	// MPSStoreID is only for accounts issued a distinct store id for MPS.
+	// Empty reuses StoreID, which is how Atmos sets most accounts up.
+	MPSStoreID string
 }
 
 // Enabled reports whether enough is configured to take money *and account for
@@ -493,11 +504,19 @@ func isMonth(s string) bool {
 // that touches them — one place to be careful about, and one place that can
 // never accidentally grow a log line.
 func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, error) {
+	return c.postWithHeaders(ctx, path, payload, nil)
+}
+
+// postWithHeaders is post() for a module that authenticates with more than the
+// bearer token — MPS, which wants its own `apikey` alongside it. Everything
+// else about the call is identical, retry on 401 included, so the two share a
+// body rather than a resemblance.
+func (c *Client) postWithHeaders(ctx context.Context, path string, payload any, extra map[string]string) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
-	raw, status, err := c.postOnce(ctx, path, body)
+	raw, status, err := c.postOnce(ctx, path, body, extra)
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +531,7 @@ func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, er
 	// credentials problem, and repeating it would only bury the reason.
 	if status == http.StatusUnauthorized {
 		c.forgetToken()
-		raw, status, err = c.postOnce(ctx, path, body)
+		raw, status, err = c.postOnce(ctx, path, body, extra)
 		if err != nil {
 			return nil, err
 		}
@@ -527,7 +546,7 @@ func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, er
 // postOnce is a single attempt: the body is already marshalled, so a retry
 // re-sends the identical bytes rather than re-encoding a map whose key order
 // might differ.
-func (c *Client) postOnce(ctx context.Context, path string, body []byte) ([]byte, int, error) {
+func (c *Client) postOnce(ctx context.Context, path string, body []byte, extra map[string]string) ([]byte, int, error) {
 	token, err := c.accessToken(ctx)
 	if err != nil {
 		return nil, 0, err
@@ -539,6 +558,9 @@ func (c *Client) postOnce(ctx context.Context, path string, body []byte) ([]byte
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
+	for k, v := range extra {
+		req.Header.Set(k, v)
+	}
 
 	res, err := c.http.Do(req)
 	if err != nil {
