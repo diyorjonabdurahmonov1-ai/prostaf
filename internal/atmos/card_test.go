@@ -150,8 +150,10 @@ func TestApplyReturnsConfirmedPayment(t *testing.T) {
 	if paid.TransactionID != "202072" {
 		t.Errorf("TransactionID = %q, want 202072", paid.TransactionID)
 	}
-	if body := f.body("/merchant/pay/apply"); body["otp"] != float64(111111) {
-		t.Errorf("otp = %#v, want the number 111111", body["otp"])
+	// A string, not a number: see Apply. "012345" sent as a JSON number is
+	// 12345 — a different code, refused, and the payer is told theirs was wrong.
+	if body := f.body("/merchant/pay/apply"); body["otp"] != "111111" {
+		t.Errorf("otp = %#v, want the string \"111111\"", body["otp"])
 	}
 }
 

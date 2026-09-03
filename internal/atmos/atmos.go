@@ -374,8 +374,13 @@ func (c *Client) Apply(ctx context.Context, transactionID, otp string) (*Payment
 	}
 	raw, err := c.post(ctx, "/merchant/pay/apply", map[string]any{
 		"transaction_id": numeric(transactionID),
-		"otp":            numeric(otp),
-		"store_id":       c.storeID(),
+		// Sent as a string, never through numeric(). An SMS code is a sequence
+		// of six digits, not a quantity: "012345" as a JSON number is 12345,
+		// which is a different code and one Atmos will refuse. That refusal
+		// reads as "Noto'g'ri SMS kod" to a payer who typed theirs correctly,
+		// and it lands on roughly one code in ten.
+		"otp":      otp,
+		"store_id": c.storeID(),
 	})
 	if err != nil {
 		return nil, err
@@ -488,33 +493,67 @@ func isMonth(s string) bool {
 // that touches them — one place to be careful about, and one place that can
 // never accidentally grow a log line.
 func (c *Client) post(ctx context.Context, path string, payload any) ([]byte, error) {
-	token, err := c.accessToken(ctx)
-	if err != nil {
-		return nil, err
-	}
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
+	raw, status, err := c.postOnce(ctx, path, body)
+	if err != nil {
+		return nil, err
+	}
+	// One retry on 401, with the cached token thrown away first.
+	//
+	// A token is cached until the expiry Atmos stated, but the gateway is
+	// entitled to end one early — a new token issued for the same account, a
+	// restart on their side — and when it does, every call from here fails
+	// until the stated hour is up. That is a whole afternoon of "to'lov
+	// tizimiga ulanib bo'lmadi" from a server that only had to ask for a new
+	// token. Retried exactly once: a 401 that survives a fresh token is a
+	// credentials problem, and repeating it would only bury the reason.
+	if status == http.StatusUnauthorized {
+		c.forgetToken()
+		raw, status, err = c.postOnce(ctx, path, body)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if status < 200 || status >= 300 {
+		return nil, fmt.Errorf("atmos: %s: http %d: %s", strings.TrimPrefix(path, "/"),
+			status, snippet(raw))
+	}
+	return raw, nil
+}
+
+// postOnce is a single attempt: the body is already marshalled, so a retry
+// re-sends the identical bytes rather than re-encoding a map whose key order
+// might differ.
+func (c *Client) postOnce(ctx context.Context, path string, body []byte) ([]byte, int, error) {
+	token, err := c.accessToken(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		c.cfg.BaseURL+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	res, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("atmos: %s: http %d: %s", strings.TrimPrefix(path, "/"),
-			res.StatusCode, snippet(raw))
-	}
-	return raw, nil
+	return raw, res.StatusCode, nil
+}
+
+// forgetToken drops the cached bearer so the next call fetches a fresh one.
+func (c *Client) forgetToken() {
+	c.tokenMu.Lock()
+	defer c.tokenMu.Unlock()
+	c.token, c.tokenTill = "", time.Time{}
 }
 
 // storeID renders the configured store the way the documented examples do — as
@@ -537,6 +576,10 @@ func numeric(s string) any {
 // ---- Callback ---------------------------------------------------------------
 
 // Callback is what Atmos posts once money has moved.
+//
+// Every field is held as text because that is what the signature is computed
+// over — see Signature. It is *not* a claim that Atmos sends them as JSON
+// strings; see UnmarshalJSON for why that distinction matters.
 type Callback struct {
 	StoreID       string `json:"store_id"`
 	TransactionID string `json:"transaction_id"`
@@ -544,6 +587,61 @@ type Callback struct {
 	// Amount is in tiyin, as Atmos counts.
 	Amount string `json:"amount"`
 	Sign   string `json:"sign"`
+}
+
+// UnmarshalJSON reads a callback whose numeric fields may arrive as JSON
+// numbers rather than as strings.
+//
+// This is the difference between money landing and money vanishing. Atmos posts
+// `{"store_id":11100,"transaction_id":257022,"amount":100000,…}` — bare
+// numbers — and the plain string fields above cannot hold them: encoding/json
+// fails the whole document with "cannot unmarshal number into Go value of type
+// string". The callback is then read as malformed, answered "Bad request", and
+// the payment stays pending for ever while the card has already been debited.
+// Nothing else in the system notices, because from its side no callback ever
+// arrived.
+//
+// The number's own digits are kept verbatim rather than parsed and reprinted:
+// the signature is a hash of the exact text Atmos concatenated, so a value that
+// came back through an int64 — losing a leading zero, or rendering 1e5 — would
+// verify against nothing.
+func (cb *Callback) UnmarshalJSON(data []byte) error {
+	// A distinct type, or this method would call itself.
+	type raw struct {
+		StoreID       json.RawMessage `json:"store_id"`
+		TransactionID json.RawMessage `json:"transaction_id"`
+		Invoice       json.RawMessage `json:"invoice"`
+		Amount        json.RawMessage `json:"amount"`
+		Sign          json.RawMessage `json:"sign"`
+	}
+	var in raw
+	if err := json.Unmarshal(data, &in); err != nil {
+		return err
+	}
+	cb.StoreID = jsonText(in.StoreID)
+	cb.TransactionID = jsonText(in.TransactionID)
+	cb.Invoice = jsonText(in.Invoice)
+	cb.Amount = jsonText(in.Amount)
+	cb.Sign = jsonText(in.Sign)
+	return nil
+}
+
+// jsonText renders one JSON value as the text it was signed as: a string
+// unquoted, a number left exactly as its digits were written, anything absent
+// as empty.
+func jsonText(raw json.RawMessage) string {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return ""
+	}
+	if s[0] == '"' {
+		var out string
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return ""
+		}
+		return strings.TrimSpace(out)
+	}
+	return s
 }
 
 // Signature is the hash Atmos signs a callback with:

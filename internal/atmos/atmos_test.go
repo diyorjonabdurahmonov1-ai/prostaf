@@ -2,6 +2,8 @@ package atmos
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -142,5 +144,69 @@ func TestEnabledRequiresCallbackKey(t *testing.T) {
 	cfg.APIKey = "merchant-api-key"
 	if !cfg.Enabled() {
 		t.Error("with the callback key present the gateway must be enabled")
+	}
+}
+
+// The shape a real callback arrives in.
+//
+// Atmos posts its ids and amounts as bare JSON numbers, and a struct of plain
+// strings cannot hold them: encoding/json fails the whole document, the
+// callback is read as malformed, and a card that was already debited credits
+// nobody. This is the decode that has to work before anything else in the
+// callback path is worth testing.
+func TestCallbackDecodesNumericFields(t *testing.T) {
+	body := `{"store_id":11100,"transaction_id":257022,
+		"invoice":"b649db3d-5185-4569-a15e-07da3659d11d",
+		"amount":100000,"sign":"e2c3f0e6"}`
+
+	var cb Callback
+	if err := json.Unmarshal([]byte(body), &cb); err != nil {
+		t.Fatalf("decoding a callback with numeric fields: %v", err)
+	}
+	for _, tc := range []struct{ field, got, want string }{
+		{"store_id", cb.StoreID, "11100"},
+		{"transaction_id", cb.TransactionID, "257022"},
+		{"invoice", cb.Invoice, "b649db3d-5185-4569-a15e-07da3659d11d"},
+		{"amount", cb.Amount, "100000"},
+		{"sign", cb.Sign, "e2c3f0e6"},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.field, tc.got, tc.want)
+		}
+	}
+}
+
+// Strings still decode, because which of the two an account sends is the
+// merchant cabinet's setting rather than ours to depend on.
+func TestCallbackDecodesStringFields(t *testing.T) {
+	body := `{"store_id":"11100","transaction_id":"257022","invoice":"pay-1",
+		"amount":"100000","sign":"abc"}`
+
+	var cb Callback
+	if err := json.Unmarshal([]byte(body), &cb); err != nil {
+		t.Fatalf("decoding a callback with string fields: %v", err)
+	}
+	if cb.TransactionID != "257022" || cb.Amount != "100000" {
+		t.Errorf("decoded %+v", cb)
+	}
+}
+
+// A numeric callback must verify against the same signature a string one does:
+// the hash is over the digits, and a value that went through an int64 on the
+// way in would be hashing something Atmos never wrote.
+func TestVerifyCallbackFromNumericJSON(t *testing.T) {
+	c := testClient()
+	want := c.Signature(Callback{
+		StoreID: "1234", TransactionID: "987654", Invoice: "pay-1", Amount: "5000000",
+	})
+	body := fmt.Sprintf(`{"store_id":1234,"transaction_id":987654,"invoice":"pay-1",
+		"amount":5000000,"sign":%q}`, want)
+
+	var cb Callback
+	if err := json.Unmarshal([]byte(body), &cb); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !c.VerifyCallback(cb) {
+		t.Error("a correctly signed numeric callback must verify")
 	}
 }

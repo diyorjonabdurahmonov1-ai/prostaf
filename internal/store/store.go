@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
 	"time"
 
@@ -522,9 +523,15 @@ func (s *Store) UpdateSettings(p SettingsPatch) models.Settings {
 		s.settings.CommissionPercent = *p.CommissionPercent
 		save("commission_percent", *p.CommissionPercent)
 	}
+	// Wallets carry their own copy of the threshold, so the setting alone would
+	// only reach accounts created after the change. Sweep the existing rows too:
+	// this is a platform-wide rule, not a per-worker one.
 	if p.MinBalance != nil {
 		s.settings.MinBalance = *p.MinBalance
 		save("min_balance", *p.MinBalance)
+		if _, err := s.db.Exec("UPDATE wallets SET min_balance = $1", *p.MinBalance); err != nil {
+			log.Printf("store: min_balance saved but wallet sweep failed: %v", err)
+		}
 	}
 	// A negative free-order limit would mean "owes us jobs"; zero is legitimate
 	// and means the trial is switched off for everybody signed up from now on.
