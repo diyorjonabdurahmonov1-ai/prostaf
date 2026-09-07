@@ -616,7 +616,11 @@ func numeric(s string) any {
 type Callback struct {
 	StoreID       string `json:"store_id"`
 	TransactionID string `json:"transaction_id"`
-	Invoice       string `json:"invoice"`
+	// Account is the merchant-side identifier the invoice was opened against —
+	// this application's payment id. Atmos signs over this field; Invoice is
+	// kept only because older callbacks carried the same value under that name.
+	Account string `json:"account"`
+	Invoice string `json:"invoice"`
 	// Amount is in tiyin, as Atmos counts.
 	Amount string `json:"amount"`
 	Sign   string `json:"sign"`
@@ -643,6 +647,7 @@ func (cb *Callback) UnmarshalJSON(data []byte) error {
 	type raw struct {
 		StoreID       json.RawMessage `json:"store_id"`
 		TransactionID json.RawMessage `json:"transaction_id"`
+		Account       json.RawMessage `json:"account"`
 		Invoice       json.RawMessage `json:"invoice"`
 		Amount        json.RawMessage `json:"amount"`
 		Sign          json.RawMessage `json:"sign"`
@@ -653,6 +658,7 @@ func (cb *Callback) UnmarshalJSON(data []byte) error {
 	}
 	cb.StoreID = jsonText(in.StoreID)
 	cb.TransactionID = jsonText(in.TransactionID)
+	cb.Account = jsonText(in.Account)
 	cb.Invoice = jsonText(in.Invoice)
 	cb.Amount = jsonText(in.Amount)
 	cb.Sign = jsonText(in.Sign)
@@ -679,13 +685,18 @@ func jsonText(raw json.RawMessage) string {
 
 // Signature is the hash Atmos signs a callback with:
 //
-//	md5(store_id + transaction_id + invoice + amount + api_key)
+//	md5(store_id + transaction_id + account + amount + api_key)
+//
+// The middle field is the merchant's own reference for the invoice. Atmos posts
+// it as `account`, and that is what the documented formula names; a callback
+// that carries it as `invoice` instead is signed over the same value under the
+// other name, so whichever of the two arrived is used.
 //
 // Verified rather than trusted, because this endpoint is necessarily public:
 // without the check, anybody who guessed a transaction id could credit a
 // wallet by posting to it.
 func (c *Client) Signature(cb Callback) string {
-	sum := md5.Sum([]byte(cb.StoreID + cb.TransactionID + cb.Invoice + cb.Amount + c.cfg.APIKey))
+	sum := md5.Sum([]byte(cb.StoreID + cb.TransactionID + cb.Ref() + cb.Amount + c.cfg.APIKey))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -703,6 +714,15 @@ func (c *Client) VerifyCallback(cb Callback) bool {
 		return false
 	}
 	return strings.EqualFold(cb.Sign, c.Signature(cb))
+}
+
+// Ref is the merchant reference the callback was signed over: `account` when
+// Atmos sent one, and `invoice` for the older shape that used that name.
+func (cb Callback) Ref() string {
+	if cb.Account != "" {
+		return cb.Account
+	}
+	return cb.Invoice
 }
 
 // AmountSom converts a callback's tiyin figure back to whole so'm, so it can be

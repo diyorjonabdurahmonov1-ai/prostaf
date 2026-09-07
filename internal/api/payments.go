@@ -319,8 +319,8 @@ func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"status": 0, "message": "Bad request"})
 		return
 	}
-	log.Printf("atmos: callback from %q for transaction %q invoice %q amount %q",
-		src, cb.TransactionID, cb.Invoice, cb.Amount)
+	log.Printf("atmos: callback from %q for transaction %q account %q amount %q",
+		src, cb.TransactionID, cb.Ref(), cb.Amount)
 	if !s.atmos.VerifyCallback(cb) {
 		log.Printf("atmos: rejected callback for transaction %q: bad signature", cb.TransactionID)
 		// Written onto the payment so the office can see why somebody's money
@@ -400,6 +400,7 @@ func readAtmosCallback(r *http.Request) (atmos.Callback, bool) {
 		cb = atmos.Callback{
 			StoreID:       r.PostFormValue("store_id"),
 			TransactionID: r.PostFormValue("transaction_id"),
+			Account:       r.PostFormValue("account"),
 			Invoice:       r.PostFormValue("invoice"),
 			Amount:        r.PostFormValue("amount"),
 			Sign:          r.PostFormValue("sign"),

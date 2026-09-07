@@ -2,6 +2,8 @@ package atmos
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -208,5 +210,27 @@ func TestVerifyCallbackFromNumericJSON(t *testing.T) {
 	}
 	if !c.VerifyCallback(cb) {
 		t.Error("a correctly signed numeric callback must verify")
+	}
+}
+
+// The documented formula signs over `account`, which is the field Atmos
+// actually posts; a callback carrying the merchant reference under that name
+// must verify, and one that omits it entirely must not be signed as if the
+// reference were empty.
+func TestVerifyCallbackSignsOverAccount(t *testing.T) {
+	c := &Client{cfg: Config{StoreID: "11100", APIKey: "secret"}}
+	var cb Callback
+	if err := json.Unmarshal([]byte(`{"store_id":"11100","transaction_id":"12769588","amount":"50000","account":"2"}`), &cb); err != nil {
+		t.Fatal(err)
+	}
+	want := md5.Sum([]byte("11100" + "12769588" + "2" + "50000" + "secret"))
+	cb.Sign = hex.EncodeToString(want[:])
+	if !c.VerifyCallback(cb) {
+		t.Fatalf("callback with account did not verify; got signature %s", c.Signature(cb))
+	}
+	// The older shape put the same value in `invoice`.
+	old := Callback{StoreID: "11100", TransactionID: "12769588", Invoice: "2", Amount: "50000", Sign: cb.Sign}
+	if !c.VerifyCallback(old) {
+		t.Error("callback with invoice did not verify")
 	}
 }
