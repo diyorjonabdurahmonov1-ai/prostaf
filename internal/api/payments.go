@@ -336,14 +336,14 @@ func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payment, settled := s.store.SettlePayment(cb.TransactionID)
+	payment, settled := s.settleForCallback(cb)
 	if !settled {
 		// Nothing moved, and which of the three reasons it was decides what
 		// Atmos is told — because this answer is not a receipt, it is an
 		// instruction. Atmos debits the card *after* reading `status: 1` here,
 		// so saying 1 about a payment this server cannot credit is asking for
 		// somebody's money on behalf of nobody.
-		existing, known := s.store.GetPaymentByExternalID(cb.TransactionID)
+		existing, known := s.paymentForCallback(cb)
 		switch {
 		case known && existing.Status == models.PaymentSuccess:
 			// A retry of one already handled. Atmos repeats a callback it did
@@ -361,7 +361,8 @@ func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
 			// A transaction this server never opened. The documented answer is a
 			// refusal, and it is the right one twice over: nothing here could be
 			// credited, so a yes would take money that lands nowhere.
-			log.Printf("atmos: callback for unknown transaction %q", cb.TransactionID)
+			log.Printf("atmos: callback for unknown transaction %q (account %q)",
+				cb.TransactionID, cb.Ref())
 			writeJSON(w, http.StatusOK, map[string]any{
 				"status": 0, "message": "Invoys tizimda mavjud emas."})
 		}
@@ -376,13 +377,51 @@ func (s *Server) handleAtmosCallback(w http.ResponseWriter, r *http.Request) {
 	if som, ok := cb.AmountSom(); !ok || som != payment.Amount {
 		log.Printf("atmos: WARNING amount mismatch on transaction %s: callback %q, expected %d so'm",
 			cb.TransactionID, cb.Amount, payment.Amount)
-		s.store.NotePaymentError(cb.TransactionID, fmt.Sprintf(
+		// By row id, not transaction id: the callback's transaction id is not
+		// one this server stored, so a note keyed on it would go nowhere.
+		s.store.NotePaymentErrorByID(payment.ID, fmt.Sprintf(
 			"Summa mos kelmadi: to'lov tizimi %q tiyin dedi, kutilgani %d so'm. Hisobga kutilgan summa yozildi.",
 			cb.Amount, payment.Amount))
 	}
 
 	s.applyPayment(payment)
 	writeJSON(w, http.StatusOK, map[string]any{"status": 1, "message": "Muvaffaqiyatli"})
+}
+
+// Which payment a callback is about, and why the transaction id is not enough.
+//
+// A callback does not arrive under the id this server opened the transaction
+// with. /merchant/pay/create answers with transaction_id 2036254324, and the
+// callback for that very payment carries transaction_id 146535697 — an id from
+// Atmos's billing side that the merchant API never shows and nothing here could
+// have stored.
+//
+// Looking up by that number alone finds nothing, and the cost of finding
+// nothing is not a missed receipt. The callback is a pre-debit check: Atmos
+// debits only after reading `status: 1`, so a "transaction unknown" refusal
+// makes it abandon the payment, and the payer — who typed a correct SMS code —
+// is shown STPIMS-ERR-093, "error in the supplier's billing system". Every 093
+// in the log has one of these refusals logged a second or two before it.
+//
+// So the `account` field is the fallback, which is the whole reason this
+// backend sends its own payment row id in it. It is safe to trust: the
+// signature Atmos signs covers account alongside store id, transaction id and
+// amount, and it is verified before either of these runs.
+func (s *Server) paymentForCallback(cb atmos.Callback) (*models.Payment, bool) {
+	if p, ok := s.store.GetPaymentByExternalID(cb.TransactionID); ok {
+		return p, true
+	}
+	return s.store.GetPayment(cb.Ref())
+}
+
+// settleForCallback is paymentForCallback plus the settle, kept as one step so
+// the guard that makes a repeated callback harmless stays inside a single
+// statement — see Store.SettlePayment.
+func (s *Server) settleForCallback(cb atmos.Callback) (*models.Payment, bool) {
+	if p, ok := s.store.SettlePayment(cb.TransactionID); ok {
+		return p, true
+	}
+	return s.store.SettlePaymentByID(cb.Ref())
 }
 
 // readAtmosCallback parses a callback sent either as JSON or as an HTML form.
