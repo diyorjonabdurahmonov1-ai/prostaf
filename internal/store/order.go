@@ -125,15 +125,6 @@ func (s *Store) HasHiredCompany(customerID, companyID string) bool {
 	return err == nil && n > 0
 }
 
-// CompanyIsBusy reports whether the company is already on a job.
-func (s *Store) CompanyIsBusy(companyID string) bool {
-	var n int
-	err := s.db.QueryRow(
-		"SELECT COUNT(*) FROM orders WHERE company_id=$1 AND status IN ('accepted','in_progress')",
-		companyID).Scan(&n)
-	return err == nil && n > 0
-}
-
 func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Order, error) {
 	var o models.Order
 	var invitedIDs, rejectedIDs, images, targetIDs string
@@ -274,10 +265,9 @@ func (s *Store) CreateCompanyOrder(customerID, companyID string, in CompanyOrder
 	if !cp.CanTakeWork() {
 		return nil, ErrCompanyUnavailable
 	}
-	// One job at a time, the same rule a worker is held to.
-	if s.CompanyIsBusy(cp.ID) {
-		return nil, ErrCompanyUnavailable
-	}
+	// No "one job at a time" here, unlike a worker: a firm is a team, and
+	// holding it to a single job turned every other customer away for the
+	// length of it.
 	if cp.Price <= 0 {
 		return nil, ErrPriceNotSet
 	}
@@ -349,11 +339,6 @@ func (s *Store) CompanyRespond(orderID, companyUserID string, accept bool) (*mod
 	if cp.Banned || !cp.CanTakeWork() {
 		return nil, ErrSubscriptionExpired
 	}
-	// One job at a time.
-	if s.CompanyIsBusy(cp.ID) {
-		return nil, ErrConflict
-	}
-
 	// Guarded, for the same reason the worker's accept is: two taps from the
 	// same firm on two devices must settle to one answer.
 	res, err := s.db.Exec(
@@ -409,6 +394,7 @@ func (s *Store) GetOrder(orderID string) (*models.Order, bool) {
 	if err != nil {
 		return nil, false
 	}
+	s.decorateBatch(o, nil)
 	return o, true
 }
 
@@ -418,7 +404,6 @@ func (s *Store) ListOrdersByCustomer(customerID string) []models.Order {
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	var out []models.Order
 	for rows.Next() {
 		o, err := s.scanOrder(rows)
@@ -426,6 +411,9 @@ func (s *Store) ListOrdersByCustomer(customerID string) []models.Order {
 			out = append(out, *o)
 		}
 	}
+	// Closed before the batch reads, which query the table again.
+	rows.Close()
+	s.decorateBatches(out)
 	return out
 }
 
@@ -472,7 +460,6 @@ func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.
 	if err != nil {
 		return nil
 	}
-	defer rows.Close()
 	var out []models.Order
 	for rows.Next() {
 		o, err := s.scanOrder(rows)
@@ -494,6 +481,9 @@ func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.
 			out = append(out, *o)
 		}
 	}
+	// Closed before the batch reads, which query the table again.
+	rows.Close()
+	s.decorateBatches(out)
 	return out
 }
 
@@ -1043,6 +1033,42 @@ func (s *Store) Complete(orderID, actorID string) (*models.Order, error) {
 		models.StatusCompleted, orderID)
 	// The job is over, so its photos are: see order_photos.go. Nothing here can
 	// touch a profile picture — only files stamped with this order's id go.
+	s.purgeOnClose(o)
+	return o, nil
+}
+
+// CompleteByWorker is the worker holding a job saying it is done.
+//
+// Only the customer could close a job, so a customer who never tapped "Ish
+// tugadi" left the worker stuck on it — and a worker on a job is offered no
+// other work. The worker may now close their own job, once it is actually
+// theirs and under way; the customer is told and can rate it as before.
+//
+// Not while a multi-worker request is still gathering: that worker has not
+// been sent to the job yet, so there is nothing to finish.
+func (s *Store) CompleteByWorker(orderID, workerUserID string) (*models.Order, error) {
+	o, ok := s.GetOrder(orderID)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if o.WorkerID == "" || o.WorkerID != workerUserID {
+		return nil, ErrForbidden
+	}
+	if o.BatchReady != nil && !*o.BatchReady {
+		return nil, ErrConflict
+	}
+	res, err := s.db.Exec(
+		`UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW()
+		 WHERE id=$2 AND worker_id=$3 AND status IN ('accepted','in_progress')`,
+		models.StatusCompleted, orderID, workerUserID)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrConflict
+	}
+	o.Status = models.StatusCompleted
+	o.InviteExpiresAt = nil
 	s.purgeOnClose(o)
 	return o, nil
 }

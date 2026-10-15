@@ -132,7 +132,16 @@ func (s *Server) orderFor(w http.ResponseWriter, r *http.Request) (*models.Order
 			isCompanyOwner = true
 		}
 	}
-	if order.CustomerID == u.ID || order.WorkerID == u.ID || u.HasRole(models.RoleAdmin) {
+	if order.CustomerID == u.ID || u.HasRole(models.RoleAdmin) {
+		return order, partyParticipant, true
+	}
+	if order.WorkerID == u.ID {
+		// Holding one place of a request that is still gathering its team is
+		// not yet being sent to the job: the phone waits until it is ready.
+		if batchGathering(order) {
+			masked := maskForWorker(*order, u.ID)
+			return &masked, partyInvited, true
+		}
 		return order, partyParticipant, true
 	}
 	// A firm owns the row from the moment the customer chose it, which is not
@@ -365,8 +374,79 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	// A customer giving up an empty place may be what completes the team.
+	s.settleBatch(order)
 	s.notifyOrderStatus(order)
+	if order.WorkerID == u.ID {
+		writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
+		return
+	}
 	writeJSON(w, http.StatusOK, order)
+}
+
+// POST /orders/batch/{batch_id}/start — "start with the workers I have".
+//
+// The places still being searched for (or that came back empty) are closed, so
+// nobody else is rung, and the workers who accepted are released to the job
+// with the customer's phone.
+func (s *Server) handleStartBatch(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	batchID := r.PathValue("batch_id")
+	orders, closed, err := s.store.StartBatch(batchID, u.ID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	for i := range orders {
+		o := &orders[i]
+		if !contains(closed, o.ID) {
+			continue
+		}
+		// Take the offer off every phone it was still ringing.
+		taken := *o
+		taken.CustomerPhone = ""
+		for _, pid := range o.InvitedWorkerIDs {
+			if wuid, ok := s.store.WorkerUserID(pid); ok {
+				s.publish(wuid, sse.Event{Type: "order.taken", Data: map[string]any{"order": taken}})
+			}
+		}
+		s.notifyOrderStatus(o)
+	}
+	s.notifyBatchReady(batchID)
+	writeJSON(w, http.StatusOK, orders)
+}
+
+// settleBatch moves a multi-worker request on after one of its places changed:
+// it pins the request as ready when the last place is settled, tells the
+// waiting workers, and refreshes the batch fields on the order in hand.
+func (s *Server) settleBatch(order *models.Order) {
+	if order == nil || order.BatchID == "" {
+		return
+	}
+	if s.store.SettleBatch(order.BatchID) {
+		s.notifyBatchReady(order.BatchID)
+	}
+	s.store.WithBatch(order)
+}
+
+// notifyBatchReady tells every worker holding a place of the request that the
+// team is complete — or the customer started without the rest — and they can
+// set off. Their order now carries the customer's phone.
+func (s *Server) notifyBatchReady(batchID string) {
+	for _, o := range s.store.BatchOrders(batchID) {
+		if o.WorkerID == "" ||
+			(o.Status != models.StatusAccepted && o.Status != models.StatusInProgress) {
+			continue
+		}
+		s.publish(o.WorkerID, sse.Event{
+			Type: "order.status",
+			Data: map[string]any{"order": maskForWorker(o, o.WorkerID)},
+		})
+		s.notify(o.WorkerID, "order.batch_ready",
+			"Ishga chiqishingiz mumkin",
+			"Jamoa yig'ildi — mijozning telefoni va manzili ochildi.",
+			map[string]any{"order_id": o.ID})
+	}
 }
 
 // POST /orders/{id}/rate (two-way)
@@ -389,10 +469,12 @@ func (s *Server) handleRate(w http.ResponseWriter, r *http.Request) {
 
 // notifyOrderStatus pushes an order.status event to both parties.
 func (s *Server) notifyOrderStatus(order *models.Order) {
-	ev := sse.Event{Type: "order.status", Data: map[string]any{"order": order}}
-	s.publish(order.CustomerID, ev)
+	s.publish(order.CustomerID, sse.Event{Type: "order.status", Data: map[string]any{"order": order}})
 	if order.WorkerID != "" {
-		s.publish(order.WorkerID, ev)
+		s.publish(order.WorkerID, sse.Event{
+			Type: "order.status",
+			Data: map[string]any{"order": maskForWorker(*order, order.WorkerID)},
+		})
 	}
 }
 

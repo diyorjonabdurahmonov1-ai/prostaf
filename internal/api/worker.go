@@ -197,6 +197,26 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 	// If that job was the last free one, say so now rather than letting the
 	// worker discover it when their phone goes quiet.
 	s.notifyTrialSpent(u.ID, wp.FreeOrdersLeft(), models.RoleWorker)
+	// One place of a multi-worker request: this may have been the last one, and
+	// until it is, the worker waits without the customer's phone.
+	s.settleBatch(order)
+	writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
+}
+
+// POST /worker/orders/{id}/complete — the worker holding the job says it is
+// done. The customer is told, and rates it as they would have anyway.
+func (s *Server) handleWorkerComplete(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	order, err := s.store.CompleteByWorker(r.PathValue("id"), u.ID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	s.notifyOrderStatus(order)
+	s.notify(order.CustomerID, "order.completed",
+		"Ish tugadi",
+		"Ishchi buyurtmangizni bajarib bo'lganini bildirdi. Ishni baholang.",
+		map[string]any{"order_id": order.ID})
 	writeJSON(w, http.StatusOK, order)
 }
 
@@ -233,10 +253,17 @@ func (s *Server) handleWorkerReject(w http.ResponseWriter, r *http.Request) {
 // maskForWorker hides the customer phone unless the order is assigned to the
 // worker (contract: customer phone is revealed only on accept).
 func maskForWorker(o models.Order, workerUserID string) models.Order {
-	if o.WorkerID != workerUserID {
+	if o.WorkerID != workerUserID || batchGathering(&o) {
 		o.CustomerPhone = ""
 	}
 	return o
+}
+
+// batchGathering reports whether the order belongs to a multi-worker request
+// that is still waiting for its team. The worker who accepted it is not sent
+// yet, so the customer's phone stays with the customer.
+func batchGathering(o *models.Order) bool {
+	return o.BatchReady != nil && !*o.BatchReady
 }
 
 // maskForCompany applies that same contract to a firm.

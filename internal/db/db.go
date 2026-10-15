@@ -539,6 +539,24 @@ func migrate(db *sql.DB) {
 		`CREATE INDEX IF NOT EXISTS idx_workers_dispatch
 			ON workers(user_id) WHERE online AND NOT banned`,
 
+		// A firm's live location — the second place it can be found from.
+		//
+		// A fuel-delivery or tow firm is rarely at its office, so measuring it from
+		// the office alone hid it from the customers it could reach fastest. The
+		// office (lat/lng) stays the firm's address; while live_location is on, the
+		// phone's last reported point is matched as well. Off by default, so every
+		// firm written before this is found exactly where it was.
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS live_location   BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS live_lat        DOUBLE PRECISION NOT NULL DEFAULT 0`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS live_lng        DOUBLE PRECISION NOT NULL DEFAULT 0`,
+		`ALTER TABLE companies ADD COLUMN IF NOT EXISTS live_updated_at TIMESTAMPTZ`,
+
+		// The customer started a multi-worker request with the workers found so
+		// far. Set on every order of the batch at once; until it is set (or every
+		// place is filled) the workers who accepted wait without the customer's
+		// phone. See Store.BatchState.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_started BOOLEAN NOT NULL DEFAULT FALSE`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

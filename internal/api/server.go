@@ -187,10 +187,15 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("GET "+p+"/workers/{id}/reviews", s.authed(s.handleWorkerReviews))
 	mux.HandleFunc("POST "+p+"/worker/orders/{id}/accept", s.authed(s.handleWorkerAccept))
 	mux.HandleFunc("POST "+p+"/worker/orders/{id}/reject", s.authed(s.handleWorkerReject))
+	// The worker holding a job says it is done. Cancelling goes through the
+	// shared POST /orders/{id}/cancel.
+	mux.HandleFunc("POST "+p+"/worker/orders/{id}/complete", s.authed(s.handleWorkerComplete))
 
 	// Company. Becoming a company is an admin action (POST /admin/companies).
 	mux.HandleFunc("PATCH "+p+"/company/profile", s.authed(s.handlePatchCompanyProfile))
 	mux.HandleFunc("POST "+p+"/company/status", s.authed(s.handleCompanyStatus))
+	// A mobile firm (fuel, towing) is also found where its phone is now.
+	mux.HandleFunc("POST "+p+"/company/live-location", s.authed(s.handleCompanyLiveLocation))
 	mux.HandleFunc("GET "+p+"/company/orders", s.authed(s.handleCompanyOrders))
 	mux.HandleFunc("POST "+p+"/company/orders/{id}/accept", s.authed(s.handleCompanyAccept))
 	mux.HandleFunc("POST "+p+"/company/orders/{id}/reject", s.authed(s.handleCompanyReject))
@@ -210,6 +215,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/orders/{id}/complete", s.authed(s.handleComplete))
 	mux.HandleFunc("POST "+p+"/orders/{id}/cancel", s.authed(s.handleCancel))
 	mux.HandleFunc("POST "+p+"/orders/{id}/rate", s.authed(s.handleRate))
+	// "Start with the workers I have": closes the places of a multi-worker
+	// request still being searched for and releases the found ones to start.
+	mux.HandleFunc("POST "+p+"/orders/batch/{batch_id}/start", s.authed(s.handleStartBatch))
 
 	// Wallet and payments. A top-up opens a transaction at Atmos and hands back
 	// the invoice URL; nothing is credited until the signed callback lands.

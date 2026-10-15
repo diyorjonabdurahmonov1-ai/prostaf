@@ -189,11 +189,20 @@ type CompanyProfile struct {
 	// DistanceKm is how far the office is from the customer asking. Set only by
 	// the nearby listing — a profile fetched on its own has nobody to measure
 	// from — and left out for a firm that never dropped a pin.
-	DistanceKm   *float64 `json:"distance_km,omitempty"`
-	Online       bool     `json:"online"`
-	Banned       bool     `json:"banned"`
-	Rating       float64  `json:"rating"`
-	RatingsCount int      `json:"ratings_count"`
+	DistanceKm *float64 `json:"distance_km,omitempty"`
+	// LiveLocation is on for a firm that goes out to its customers (fuel
+	// delivery, a tow truck) and shares where its phone is now. While on — and
+	// the firm online — it is found near *both* its office and LiveLat/LiveLng,
+	// and DistanceKm is the nearer of the two. The office does not move.
+	LiveLocation bool    `json:"live_location"`
+	LiveLat      float64 `json:"live_lat,omitempty"`
+	LiveLng      float64 `json:"live_lng,omitempty"`
+	// LiveUpdatedAt is when the live point was last reported.
+	LiveUpdatedAt *time.Time `json:"live_updated_at,omitempty"`
+	Online        bool       `json:"online"`
+	Banned        bool       `json:"banned"`
+	Rating        float64    `json:"rating"`
+	RatingsCount  int        `json:"ratings_count"`
 	// AvatarURL is the firm's logo. Images stays the work gallery.
 	AvatarURL string `json:"avatar_url"`
 	// Address is where the office is, in words.
@@ -346,6 +355,14 @@ type Order struct {
 	// BatchSize is how many orders that request was split into — 1 for an
 	// ordinary order. See BatchID.
 	BatchSize int `json:"batch_size,omitempty"`
+	// BatchReady says whether the request this order belongs to may start:
+	// every place filled, or the customer chose to start with the workers found
+	// so far. Until then the workers who accepted wait without the customer's
+	// phone. Derived on read; nil (absent) on an order that is not in a batch.
+	BatchReady *bool `json:"batch_ready,omitempty"`
+	// BatchFound is how many places of the request are filled, for the
+	// worker's "waiting for the team" message. Derived on read.
+	BatchFound int `json:"batch_found,omitempty"`
 
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.

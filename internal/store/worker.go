@@ -384,14 +384,19 @@ type CompanyInput struct {
 func (s *Store) scanCompany(row interface{ Scan(dest ...any) error }) (*models.CompanyProfile, error) {
 	var cp models.CompanyProfile
 	var images, categoryIDs string
-	var until sql.NullTime
+	var until, liveAt sql.NullTime
 	err := row.Scan(&cp.ID, &cp.UserID, &cp.Name, &cp.Phone, &cp.Description, &images,
 		&cp.Online, &cp.Banned, &cp.Rating, &cp.RatingsCount, &cp.CreatedAt, &cp.Price,
 		&cp.AvatarURL, &cp.Address, &cp.WorkingHours, &cp.EmployeesCount, &cp.ExperienceYears,
 		&cp.Email, &cp.Website, &categoryIDs, &cp.Services, &cp.Lat, &cp.Lng,
-		&cp.INN, &cp.FreeOrdersUsed, &until)
+		&cp.INN, &cp.FreeOrdersUsed, &until,
+		&cp.LiveLocation, &cp.LiveLat, &cp.LiveLng, &liveAt)
 	if err != nil {
 		return nil, err
+	}
+	if liveAt.Valid {
+		at := liveAt.Time
+		cp.LiveUpdatedAt = &at
 	}
 	cp.Images = unmarshalStrings(images)
 	cp.CategoryIDs = unmarshalStrings(categoryIDs)
@@ -413,7 +418,7 @@ const companyCols = `id, user_id, name, phone, description, images, online, bann
 	experience_years, email, website, category_ids, services, lat, lng, inn,
 	COALESCE((SELECT ft.used FROM free_trials ft
 		WHERE companies.inn <> '' AND ft.key = 'company:' || companies.inn), 0) AS free_orders_used,
-	subscription_until`
+	subscription_until, live_location, live_lat, live_lng, live_updated_at`
 
 // CreateCompanyProfile creates a company profile and grants the company role.
 func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.CompanyProfile, error) {
@@ -625,8 +630,49 @@ func (s *Store) SetCompanyStatus(userID string, online bool) (*models.CompanyPro
 	return cp, nil
 }
 
-// ListOnlineCompanies returns bookable companies: online, not banned, not
-// already on a job, and never the caller's own company.
+// SetCompanyLiveLocation switches a firm's live location and records where its
+// phone is now. One call does both jobs — turning it on, and reporting moves
+// while it is on — so a point that arrives with enabled=true is always stored.
+//
+// Turning it on needs a point to start from: a firm switched "live" with
+// nowhere to be found would be matched against 0,0. Turning it off forgets the
+// point, so a position the firm stopped sharing is not left on record.
+func (s *Store) SetCompanyLiveLocation(userID string, enabled bool, lat, lng *float64) (*models.CompanyProfile, error) {
+	cp, ok := s.getCompanyByUser(userID)
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if !enabled {
+		s.db.Exec(`UPDATE companies SET live_location=FALSE, live_lat=0, live_lng=0, live_updated_at=NULL
+			WHERE user_id=$1`, userID)
+		cp.LiveLocation, cp.LiveLat, cp.LiveLng, cp.LiveUpdatedAt = false, 0, 0, nil
+		return cp, nil
+	}
+	hasPoint := lat != nil && lng != nil && (*lat != 0 || *lng != 0)
+	if hasPoint && (*lat < -90 || *lat > 90 || *lng < -180 || *lng > 180) {
+		return nil, ErrBadRequest
+	}
+	if !hasPoint {
+		// Already on, and the app only re-asserted it: keep the last point.
+		if cp.LiveLocation && (cp.LiveLat != 0 || cp.LiveLng != 0) {
+			return cp, nil
+		}
+		return nil, ErrBadRequest
+	}
+	now := time.Now()
+	s.db.Exec(`UPDATE companies SET live_location=TRUE, live_lat=$1, live_lng=$2, live_updated_at=$3
+		WHERE user_id=$4`, *lat, *lng, now, userID)
+	cp.LiveLocation, cp.LiveLat, cp.LiveLng, cp.LiveUpdatedAt = true, *lat, *lng, &now
+	return cp, nil
+}
+
+// hasLivePoint reports whether a firm is sharing a usable live location.
+func hasLivePoint(cp *models.CompanyProfile) bool {
+	return cp.LiveLocation && (cp.LiveLat != 0 || cp.LiveLng != 0)
+}
+
+// ListOnlineCompanies returns bookable companies: online, not banned, and never
+// the caller's own company. A firm on a job stays listed — it is a team.
 func (s *Store) ListOnlineCompanies(excludeUserID string) []models.CompanyProfile {
 	rows, err := s.db.Query("SELECT " + companyCols + " FROM companies WHERE online=TRUE AND banned=FALSE")
 	if err != nil {
@@ -639,7 +685,7 @@ func (s *Store) ListOnlineCompanies(excludeUserID string) []models.CompanyProfil
 		if err != nil {
 			continue
 		}
-		if cp.UserID == excludeUserID || s.CompanyIsBusy(cp.ID) {
+		if cp.UserID == excludeUserID {
 			continue
 		}
 		out = append(out, *cp)
@@ -671,11 +717,19 @@ func (s *Store) NearbyCompanies(lat, lng, radiusKm float64, excludeUserID string
 	out := []models.CompanyProfile{}
 	dist := map[string]float64{}
 	for _, cp := range all {
-		if cp.Lat == 0 && cp.Lng == 0 {
-			continue
+		// Measured from the office and, for a firm sharing its live location,
+		// from where its phone is now — whichever is nearer. A firm with no
+		// office pin can still be found by its live point.
+		d := -1.0
+		if cp.Lat != 0 || cp.Lng != 0 {
+			d = geo.DistanceKm(lat, lng, cp.Lat, cp.Lng)
 		}
-		d := geo.DistanceKm(lat, lng, cp.Lat, cp.Lng)
-		if d > radiusKm {
+		if hasLivePoint(&cp) {
+			if live := geo.DistanceKm(lat, lng, cp.LiveLat, cp.LiveLng); d < 0 || live < d {
+				d = live
+			}
+		}
+		if d < 0 || d > radiusKm {
 			continue
 		}
 		dist[cp.ID] = d

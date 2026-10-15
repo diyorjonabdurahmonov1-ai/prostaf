@@ -75,6 +75,28 @@ func (s *Server) handleCompanyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, cp)
 }
 
+// POST /company/live-location — body { enabled, lat?, lng? }.
+//
+// Switches the firm's live location on or off, and while on is how the app
+// reports the phone's moves. The office address is not touched.
+func (s *Server) handleCompanyLiveLocation(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var body struct {
+		Enabled bool     `json:"enabled"`
+		Lat     *float64 `json:"lat"`
+		Lng     *float64 `json:"lng"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	cp, err := s.store.SetCompanyLiveLocation(u.ID, body.Enabled, body.Lat, body.Lng)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cp)
+}
+
 // GET /companies?lat=&lng=&radius_km= (bookable online companies; the point is
 // optional and narrows the list to firms near the customer)
 func (s *Server) handleListCompanies(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +136,10 @@ func (s *Server) handleGetCompany(w http.ResponseWriter, r *http.Request) {
 func (s *Server) publicCompany(viewer *models.User, cp models.CompanyProfile) models.CompanyProfile {
 	if viewer != nil && (cp.UserID == viewer.ID || viewer.HasRole(models.RoleAdmin)) {
 		return cp
+	}
+	// Where the firm's phone is, only while it is sharing that on purpose.
+	if !cp.Online || !cp.LiveLocation {
+		cp.LiveLocation, cp.LiveLat, cp.LiveLng, cp.LiveUpdatedAt = false, 0, 0, nil
 	}
 	cp.INN = ""
 	cp.SubscriptionUntil = nil
