@@ -81,6 +81,9 @@ func writeStoreError(w http.ResponseWriter, err error) {
 			"Buyurtma saqlanmadi. Qayta urinib ko'ring.")
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", "resource not found")
+	case errors.Is(err, store.ErrTooEarly):
+		writeError(w, http.StatusConflict, "too_early",
+			"Hali erta. Ishchiga yetib kelishi uchun belgilangan vaqt tugashini kuting.")
 	case errors.Is(err, store.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "request conflicts with current state")
 	case errors.Is(err, store.ErrForbidden):

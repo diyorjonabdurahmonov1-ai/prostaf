@@ -563,6 +563,23 @@ func migrate(db *sql.DB) {
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS responded_at TIMESTAMPTZ`,
 
+		// What a cancellation gave back, what a worker who walked away from a
+		// job forfeited, whether the job was taken on a free trial, and when
+		// the worker reached the customer.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS free_trial_used BOOLEAN NOT NULL DEFAULT FALSE`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_refunded BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_forfeited BIGINT NOT NULL DEFAULT 0`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS arrived_at TIMESTAMPTZ`,
+
+		// A customer's report that the worker who took the job never came.
+		`CREATE TABLE IF NOT EXISTS worker_no_shows (
+			id             TEXT PRIMARY KEY,
+			order_id       TEXT NOT NULL,
+			worker_user_id TEXT NOT NULL,
+			created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_no_shows_worker ON worker_no_shows(worker_user_id)`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

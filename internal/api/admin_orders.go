@@ -42,6 +42,7 @@ func (s *Server) handleAdminCancelOrder(w http.ResponseWriter, r *http.Request) 
 	s.withdrawOffer(before)
 	s.settleBatch(order)
 	s.notifyOrderStatus(order)
+	s.notifyRefund(order)
 	body := "Buyurtma administrator tomonidan bekor qilindi."
 	if reason := strings.TrimSpace(in.Reason); reason != "" {
 		body += " Sabab: " + reason

@@ -113,12 +113,15 @@ func (s *Store) canWorkerAccept(wp *models.WorkerProfile) bool {
 // consume is atomic, so if it fails — the last free job went to another order a
 // millisecond earlier — this falls through to the wallet rather than handing out
 // a fourth free job.
-func (s *Store) chargeWorkerAcceptance(wp *models.WorkerProfile, commission int64) int64 {
+//
+// The second result says a free job was what paid for it — recorded on the
+// order so that a cancellation knows to give the free job back, not money.
+func (s *Store) chargeWorkerAcceptance(wp *models.WorkerProfile, commission int64) (int64, bool) {
 	if s.consumeFreeOrder(WorkerTrialKey(wp.PassportSeries)) {
-		return 0
+		return 0, true
 	}
 	s.deductCommission(wp.UserID, commission)
-	return commission
+	return commission, false
 }
 
 // chargeCompanyAcceptance settles a job a firm has just accepted.

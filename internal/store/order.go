@@ -128,18 +128,22 @@ func (s *Store) HasHiredCompany(customerID, companyID string) bool {
 func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Order, error) {
 	var o models.Order
 	var invitedIDs, rejectedIDs, images, targetIDs string
-	var inviteExpires, responded sql.NullTime
+	var inviteExpires, responded, arrived sql.NullTime
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
 		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs,
-		&o.BatchID, &o.BatchSize, &o.CancelledBy, &o.CancelReason, &responded)
+		&o.BatchID, &o.BatchSize, &o.CancelledBy, &o.CancelReason, &responded, &arrived)
 	if err != nil {
 		return nil, err
 	}
 	if responded.Valid {
 		o.RespondedAt = &responded.Time
 	}
+	if arrived.Valid {
+		o.ArrivedAt = &arrived.Time
+	}
+	s.setNoShowAfter(&o)
 	// A row from before the column existed, or a lone order: one of one.
 	if o.BatchSize < 1 {
 		o.BatchSize = 1
@@ -163,7 +167,7 @@ const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, 
 
 // orderReadCols is what scanOrder reads: the columns an order is written with,
 // plus the ones only ever set later in its life.
-const orderReadCols = orderCols + ", cancelled_by, cancel_reason, responded_at"
+const orderReadCols = orderCols + ", cancelled_by, cancel_reason, responded_at, arrived_at"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -843,7 +847,9 @@ func (s *Store) reopen(o *models.Order) (*models.Order, error) {
 		}
 		res, err := s.db.Exec(
 			`UPDATE orders SET status=$1, invited_worker_ids='[]', rejected_worker_ids=$2, invite_expires_at=$3,
-			        worker_id='', worker_phone='', cancelled_by='', cancel_reason='', responded_at=NULL, closed_at=NULL
+			        worker_id='', worker_phone='', cancelled_by='', cancel_reason='', responded_at=NULL, closed_at=NULL,
+			        arrived_at=NULL, commission_forfeited=commission_forfeited+commission_amount, commission_amount=0,
+			        free_trial_used=FALSE
 			 WHERE id=$4 AND status='cancelled' AND worker_id=$5`,
 			models.StatusMatching, marshalJSON(dropped), expires, o.ID, o.WorkerID)
 		if err != nil {
@@ -941,7 +947,7 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	// above — two workers reaching this line together both pass every check.
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL, commission_amount=$4,
-		        responded_at=NOW()
+		        responded_at=NOW(), arrived_at=NULL, free_trial_used=FALSE
 		 WHERE id=$5 AND worker_id='' AND status IN ('matching','invited')`,
 		models.StatusAccepted, workerUserID, wp.Phone, commission, orderID)
 	if err != nil {
@@ -955,9 +961,9 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	// spends one of those instead of the commission. The order row is corrected
 	// afterwards rather than before, because whether the job is free is only
 	// settled by the atomic consume inside the call.
-	charged := s.chargeWorkerAcceptance(wp, commission)
-	if charged != commission {
-		s.db.Exec("UPDATE orders SET commission_amount=$1 WHERE id=$2", charged, orderID)
+	charged, onTrial := s.chargeWorkerAcceptance(wp, commission)
+	if charged != commission || onTrial {
+		s.db.Exec("UPDATE orders SET commission_amount=$1, free_trial_used=$2 WHERE id=$3", charged, onTrial, orderID)
 	}
 
 	o.Status = models.StatusAccepted
@@ -1229,6 +1235,14 @@ func (s *Store) cancel(o *models.Order, by, reason string) (*models.Order, error
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrConflict
+	}
+	// The worker paid to take a job that the customer, or the office, then
+	// called off. That is not the worker's doing, so what they paid comes back.
+	// A worker who cancels their own job keeps nothing back.
+	held := o.Status == models.StatusAccepted || o.Status == models.StatusInProgress
+	if held && o.WorkerID != "" && (by == CancelledByCustomer || by == CancelledByAdmin) {
+		o.RefundedCommission, o.TrialRestored = s.refundAcceptance(o.ID, o.WorkerID)
+		o.CommissionAmount = 0
 	}
 	o.Status = models.StatusCancelled
 	o.InviteExpiresAt = nil

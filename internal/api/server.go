@@ -137,6 +137,8 @@ func (s *Server) routes() http.Handler {
 
 	// Liveness, for the container runtime and whatever watches the domain.
 	mux.HandleFunc("GET "+p+"/healthz", s.handleHealth)
+	// Asked before sign-in, by an app that may be too old to sign in at all.
+	mux.HandleFunc("GET "+p+"/app/version", s.handleAppVersion)
 
 	// Auth (public). There is no /auth/register: an account is only ever opened
 	// through /auth/otp/verify, so every account has a proven phone behind it.
@@ -190,6 +192,7 @@ func (s *Server) routes() http.Handler {
 	// The worker holding a job says it is done. Cancelling goes through the
 	// shared POST /orders/{id}/cancel.
 	mux.HandleFunc("POST "+p+"/worker/orders/{id}/complete", s.authed(s.handleWorkerComplete))
+	mux.HandleFunc("POST "+p+"/worker/orders/{id}/arrived", s.authed(s.handleWorkerArrived))
 
 	// Company. Becoming a company is an admin action (POST /admin/companies).
 	mux.HandleFunc("PATCH "+p+"/company/profile", s.authed(s.handlePatchCompanyProfile))
@@ -214,6 +217,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/orders/{id}/dispatch", s.authed(s.handleRedispatch))
 	mux.HandleFunc("POST "+p+"/orders/{id}/complete", s.authed(s.handleComplete))
 	mux.HandleFunc("POST "+p+"/orders/{id}/cancel", s.authed(s.handleCancel))
+	mux.HandleFunc("POST "+p+"/orders/{id}/no-show", s.authed(s.handleNoShow))
 	mux.HandleFunc("POST "+p+"/orders/{id}/rate", s.authed(s.handleRate))
 	// "Start with the workers I have": closes the places of a multi-worker
 	// request still being searched for and releases the found ones to start.

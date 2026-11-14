@@ -722,6 +722,12 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		// are rung per wave, nearest first (0 = everybody at once).
 		MatchRadiusKm    *int `json:"match_radius_km"`
 		DispatchWaveSize *int `json:"dispatch_wave_size"`
+		// How long a customer waits before reporting a no-show, and the
+		// oldest app version still allowed with where to get a newer one.
+		NoShowMinutes   *int    `json:"no_show_minutes"`
+		MinAppVersion   *string `json:"min_app_version"`
+		AndroidStoreURL *string `json:"android_store_url"`
+		IOSStoreURL     *string `json:"ios_store_url"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -735,6 +741,10 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		SubscriptionWarnDays:   in.SubscriptionWarnDays,
 		MatchRadiusKm:          in.MatchRadiusKm,
 		DispatchWaveSize:       in.DispatchWaveSize,
+		NoShowMinutes:          in.NoShowMinutes,
+		MinAppVersion:          in.MinAppVersion,
+		AndroidStoreURL:        in.AndroidStoreURL,
+		IOSStoreURL:            in.IOSStoreURL,
 	})
 	writeJSON(w, http.StatusOK, settings)
 }

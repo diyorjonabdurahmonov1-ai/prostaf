@@ -560,7 +560,7 @@ func (s *Store) OrderAnalytics(period string) Analytics {
 		format = "YYYY-MM-DD"
 	}
 	rows, err := s.db.Query(
-		"SELECT to_char(created_at, '" + format + "') as p, COUNT(*), COALESCE(SUM(commission_amount),0) FROM orders GROUP BY p ORDER BY p")
+		"SELECT to_char(created_at, '" + format + "') as p, COUNT(*), COALESCE(SUM(commission_amount + commission_forfeited),0) FROM orders GROUP BY p ORDER BY p")
 	if err != nil {
 		return Analytics{Buckets: []Bucket{}}
 	}
@@ -612,12 +612,12 @@ func (s *Store) AdminStats() AdminStats {
 	count("SELECT COUNT(*) FROM orders WHERE status IN ('pending','matching','invited','accepted','in_progress')", &a.ActiveOrders)
 	count("SELECT COUNT(*) FROM orders WHERE status='completed'", &a.CompletedOrders)
 	a.TotalCustomers = max(a.TotalUsers-a.TotalWorkers-a.TotalCompanies, 0)
-	_ = s.db.QueryRow("SELECT COALESCE(SUM(commission_amount),0) FROM orders").Scan(&a.TotalRevenue)
+	_ = s.db.QueryRow("SELECT COALESCE(SUM(commission_amount + commission_forfeited),0) FROM orders").Scan(&a.TotalRevenue)
 
 	// Last 7 days, oldest first, with zero-filled gaps so the chart never lies.
 	revByDay := map[string]int64{}
 	cntByDay := map[string]int{}
-	rows, err := s.db.Query(`SELECT to_char(created_at,'YYYY-MM-DD'), COUNT(*), COALESCE(SUM(commission_amount),0)
+	rows, err := s.db.Query(`SELECT to_char(created_at,'YYYY-MM-DD'), COUNT(*), COALESCE(SUM(commission_amount + commission_forfeited),0)
 		FROM orders WHERE created_at >= NOW() - INTERVAL '7 days' GROUP BY 1`)
 	if err == nil {
 		defer rows.Close()
@@ -696,9 +696,9 @@ func (s *Store) adminOrders(period, status, orderID string) []AdminOrder {
 	}
 	q := `SELECT o.id, o.customer_id, o.worker_id, o.company_id, o.category_id, o.gender,
 		o.description, o.image_url, o.customer_phone, o.worker_phone, o.lat, o.lng, o.status,
-		o.invited_worker_ids, o.invite_expires_at, o.commission_amount, o.created_at,
+		o.invited_worker_ids, o.invite_expires_at, o.commission_amount + o.commission_forfeited, o.created_at,
 		COALESCE(o.customer_name,''), o.price,
-		o.batch_id, o.batch_size, o.cancelled_by, o.cancel_reason, o.responded_at,
+		o.batch_id, o.batch_size, o.cancelled_by, o.cancel_reason, o.responded_at, o.arrived_at,
 		to_char(o.created_at, '` + format + `'),
 		COALESCE(NULLIF(cu.name,''), o.customer_name, ''), COALESCE(cu.gmail,''),
 		COALESCE(w.full_name,''), COALESCE(co.name,''), COALESCE(cat.name_uz,'')
@@ -727,12 +727,12 @@ func (s *Store) adminOrders(period, status, orderID string) []AdminOrder {
 	for rows.Next() {
 		var ao AdminOrder
 		var invitedIDs, joinedName string
-		var inviteExpires, responded sql.NullTime
+		var inviteExpires, responded, arrived sql.NullTime
 		err := rows.Scan(&ao.ID, &ao.CustomerID, &ao.WorkerID, &ao.CompanyID, &ao.CategoryID,
 			&ao.Gender, &ao.Description, &ao.ImageURL, &ao.CustomerPhone, &ao.WorkerPhone,
 			&ao.Lat, &ao.Lng, &ao.Status, &invitedIDs, &inviteExpires, &ao.CommissionAmount,
 			&ao.CreatedAt, &ao.CustomerName, &ao.Price,
-			&ao.BatchID, &ao.BatchSize, &ao.CancelledBy, &ao.CancelReason, &responded, &ao.Bucket, &joinedName, &ao.CustomerEmail,
+			&ao.BatchID, &ao.BatchSize, &ao.CancelledBy, &ao.CancelReason, &responded, &arrived, &ao.Bucket, &joinedName, &ao.CustomerEmail,
 			&ao.WorkerName, &ao.CompanyName, &ao.CategoryName)
 		if err != nil {
 			continue
@@ -743,6 +743,9 @@ func (s *Store) adminOrders(period, status, orderID string) []AdminOrder {
 		}
 		if responded.Valid {
 			ao.RespondedAt = &responded.Time
+		}
+		if arrived.Valid {
+			ao.ArrivedAt = &arrived.Time
 		}
 		if joinedName != "" {
 			ao.CustomerName = joinedName
@@ -786,7 +789,7 @@ func (s *Store) FinanceOverview() Finance {
 		f.Totals.Topups += p.Amount
 	}
 	// Sum commission from orders.
-	s.db.QueryRow("SELECT COALESCE(SUM(commission_amount),0) FROM orders").Scan(&f.Totals.Commission)
+	s.db.QueryRow("SELECT COALESCE(SUM(commission_amount + commission_forfeited),0) FROM orders").Scan(&f.Totals.Commission)
 	f.CommissionPercent = s.settings.CommissionPercent
 	return f
 }
@@ -802,4 +805,9 @@ type SettingsPatch struct {
 
 	MatchRadiusKm    *int
 	DispatchWaveSize *int
+
+	NoShowMinutes   *int
+	MinAppVersion   *string
+	AndroidStoreURL *string
+	IOSStoreURL     *string
 }
