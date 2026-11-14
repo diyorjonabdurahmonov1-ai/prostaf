@@ -1606,6 +1606,121 @@ paths:
               schema:
                 $ref: "#/components/schemas/Finance"
 
+  /admin/orders/{id}:
+    get:
+      tags: [Admin]
+      summary: One order as the office sees it
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The order, with names joined in
+  /admin/orders/{id}/cancel:
+    post:
+      tags: [Admin]
+      summary: Cancel an order from the office (cancelled_by = admin)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        "200":
+          description: The order, with names joined in
+        "409":
+          description: The order is not in a state that allows this
+  /admin/orders/{id}/complete:
+    post:
+      tags: [Admin]
+      summary: Close a job that is under way
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The order, with names joined in
+        "409":
+          description: The order is not in a state that allows this
+  /admin/orders/{id}/dispatch:
+    post:
+      tags: [Admin]
+      summary: Search again for an order nobody is working on
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The order, with names joined in
+        "409":
+          description: The order is not in a state that allows this
+  /admin/orders/{id}/assign:
+    post:
+      tags: [Admin]
+      summary: Hand the order to one worker; no commission is taken
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [worker_id]
+              properties:
+                worker_id:
+                  type: string
+                  description: The worker's user id
+      responses:
+        "200":
+          description: The order, with names joined in
+        "409":
+          description: The order is not in a state that allows this
+  /admin/push/broadcast:
+    post:
+      tags: [Admin]
+      summary: Send one message to a whole audience
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title, body, audience]
+              properties:
+                title:
+                  type: string
+                body:
+                  type: string
+                audience:
+                  type: string
+                  enum: [workers, companies, customers, all]
+                only_online:
+                  type: boolean
+      responses:
+        "200":
+          description: "{ ok, recipients }"
+
   /admin/settings:
     get:
       tags: [Admin]
@@ -1628,6 +1743,12 @@ paths:
               properties:
                 commission_percent:
                   type: integer
+                match_radius_km:
+                  type: integer
+                  description: How far from a job a worker may be and still be rung (1-200)
+                dispatch_wave_size:
+                  type: integer
+                  description: Workers rung per wave, nearest first; 0 rings everybody at once
                 min_balance:
                   type: integer
                 free_order_limit:

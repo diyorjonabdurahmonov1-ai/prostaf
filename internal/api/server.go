@@ -250,6 +250,12 @@ func (s *Server) routes() http.Handler {
 	// order not reach the worker?".
 	mux.HandleFunc("GET "+p+"/admin/realtime", s.admin(s.handleAdminRealtime))
 	mux.HandleFunc("GET "+p+"/admin/orders", s.admin(s.handleAdminOrders))
+	mux.HandleFunc("GET "+p+"/admin/orders/{id}", s.admin(s.handleAdminGetOrder))
+	mux.HandleFunc("POST "+p+"/admin/orders/{id}/cancel", s.admin(s.handleAdminCancelOrder))
+	mux.HandleFunc("POST "+p+"/admin/orders/{id}/complete", s.admin(s.handleAdminCompleteOrder))
+	mux.HandleFunc("POST "+p+"/admin/orders/{id}/dispatch", s.admin(s.handleAdminDispatchOrder))
+	mux.HandleFunc("POST "+p+"/admin/orders/{id}/assign", s.admin(s.handleAdminAssignOrder))
+	mux.HandleFunc("POST "+p+"/admin/push/broadcast", s.admin(s.handleAdminBroadcast))
 	mux.HandleFunc("GET "+p+"/admin/users", s.admin(s.handleAdminUsers))
 	mux.HandleFunc("GET "+p+"/admin/users/{id}", s.admin(s.handleAdminGetUser))
 	mux.HandleFunc("PATCH "+p+"/admin/users/{id}", s.admin(s.handleAdminUpdateUser))

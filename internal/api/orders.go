@@ -377,6 +377,14 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	// A customer giving up an empty place may be what completes the team.
 	s.settleBatch(order)
 	s.notifyOrderStatus(order)
+	// A worker walking away from a job is something the customer has to act
+	// on, and the socket event alone only reaches a phone that is open.
+	if order.CancelledBy == store.CancelledByWorker && order.WorkerID == u.ID {
+		s.notify(order.CustomerID, "order.cancelled",
+			"Ishchi buyurtmani bekor qildi",
+			"Buyurtmani ochib, boshqa ishchi qidirishingiz mumkin.",
+			map[string]any{"order_id": order.ID})
+	}
 	if order.WorkerID == u.ID {
 		writeJSON(w, http.StatusOK, maskForWorker(*order, u.ID))
 		return

@@ -257,7 +257,7 @@ func (s *Store) GetWorkerByUser(userID string) (*models.WorkerProfile, bool) {
 // lookup left is asked once, for the workers that are actually nearby.
 func (s *Store) NearbyWorkers(lat, lng, radiusKm float64, excludeUserID string) []models.WorkerProfile {
 	if radiusKm <= 0 {
-		radiusKm = matchRadiusKm
+		radiusKm = s.radiusKm()
 	}
 	rows, err := s.db.Query("SELECT " + workerCols + " FROM workers WHERE online=TRUE AND banned=FALSE")
 	if err != nil {
