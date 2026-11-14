@@ -76,25 +76,27 @@ func (s *Server) notify(userID, kind, title, body string, data map[string]any) *
 func (s *Server) ring(userID, title, body string, data map[string]any, ttl time.Duration) {
 	if s.fcm != nil {
 		if token := s.store.GetDeviceToken(userID); token != "" {
-			go s.sendFCM(token, title, body, data, ttl)
+			go s.sendFCM(token, s.store.GetPushChannel(userID), title, body, data, ttl)
 			return
 		}
 	}
 	if token := s.store.GetPushToken(userID); token != "" {
-		push.Send(push.Urgent(token, title, body, data, int(ttl.Seconds())))
+		m := push.Urgent(token, title, body, data, int(ttl.Seconds()))
+		m.ChannelID = s.store.GetPushChannel(userID)
+		push.Send(m)
 	}
 }
 
 // sendFCM delivers one Firebase message and retires a token Firebase says is
 // gone. Falling back to Expo on any other error would double-send to a device
 // that is simply unreachable this second, so it does not.
-func (s *Server) sendFCM(token, title, body string, data map[string]any, ttl time.Duration) {
+func (s *Server) sendFCM(token, channel, title, body string, data map[string]any, ttl time.Duration) {
 	err := s.fcm.Send(fcm.Message{
 		Token:     token,
 		Title:     title,
 		Body:      body,
 		Data:      data,
-		ChannelID: "orders",
+		ChannelID: channel,
 		TTL:       ttl,
 	})
 	switch {

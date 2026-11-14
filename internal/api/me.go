@@ -35,6 +35,8 @@ func (s *Server) handleSetPushToken(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Token       string `json:"token"`
 		DeviceToken string `json:"device_token"`
+		// The order channel this build registered; see Store.SetPushChannel.
+		Channel string `json:"channel"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -54,6 +56,9 @@ func (s *Server) handleSetPushToken(w http.ResponseWriter, r *http.Request) {
 			writeStoreError(w, err)
 			return
 		}
+	}
+	if body.Channel != "" {
+		s.store.SetPushChannel(u.ID, body.Channel)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true,

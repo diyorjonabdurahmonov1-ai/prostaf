@@ -45,7 +45,7 @@ func (s *Server) handlePushTest(w http.ResponseWriter, r *http.Request) {
 				Title:     body.Title,
 				Body:      body.Body,
 				Data:      map[string]any{"type": "test.push"},
-				ChannelID: "orders",
+				ChannelID: s.store.GetPushChannel(u.ID),
 				TTL:       60 * time.Second,
 			})
 			out := map[string]any{"transport": "fcm", "token": device}

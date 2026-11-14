@@ -384,6 +384,31 @@ func (s *Store) SetDeviceToken(userID, token string) error {
 	return nil
 }
 
+// pushChannels are the notification channels an app build may ask to be rung
+// on. Anything else is ignored: the value ends up in a message to Firebase, and
+// a channel that does not exist on the phone files the notification under
+// "Miscellaneous", silent — which looks exactly like not being delivered.
+var pushChannels = map[string]bool{"orders": true, "orders_v2": true}
+
+// SetPushChannel records which order channel this user's phone has.
+func (s *Store) SetPushChannel(userID, channel string) {
+	if !pushChannels[channel] {
+		return
+	}
+	s.db.Exec("UPDATE users SET push_channel=$1 WHERE id=$2", channel, userID)
+}
+
+// GetPushChannel is the channel to ring this user on: the one their app said it
+// has, or the original for a build that never said.
+func (s *Store) GetPushChannel(userID string) string {
+	var channel string
+	s.db.QueryRow("SELECT push_channel FROM users WHERE id=$1", userID).Scan(&channel)
+	if !pushChannels[channel] {
+		return "orders"
+	}
+	return channel
+}
+
 // GetDeviceToken returns the user's FCM registration token, or "".
 func (s *Store) GetDeviceToken(userID string) string {
 	var token string
