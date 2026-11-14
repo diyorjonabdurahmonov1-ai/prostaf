@@ -70,8 +70,19 @@ var (
 	ErrPriceNotSet = errors.New("price_not_set")
 )
 
-// matchRadiusKm is the smart-matchmaking radius.
+// matchRadiusKm is the matchmaking radius until the office sets another.
 const matchRadiusKm = 15.0
+
+// defaultDispatchWaveSize is how many workers a wave rings, nearest first,
+// until the office sets another. See Store.DispatchWave.
+const defaultDispatchWaveSize = 3
+
+// Bounds on what the office may set, so a slip of the finger cannot switch
+// matching off (0 km) or ring a whole region.
+const (
+	maxMatchRadiusKm    = 200
+	maxDispatchWaveSize = 50
+)
 
 // Store wraps a PostgreSQL database with domain methods.
 type Store struct {
@@ -97,6 +108,8 @@ func New(cfg config.Config, db *sql.DB, blobs *blob.Store) *Store {
 			CompanyMonthlyPrice:    cfg.CompanyMonthlyPrice,
 			CompanyDiscountPercent: cfg.CompanyDiscountPercent,
 			SubscriptionWarnDays:   cfg.SubscriptionWarnDays,
+			MatchRadiusKm:          int(matchRadiusKm),
+			DispatchWaveSize:       defaultDispatchWaveSize,
 		},
 	}
 	s.seed()
@@ -202,6 +215,16 @@ func (s *Store) loadSettings() {
 	loadInt64("company_monthly_price", &s.settings.CompanyMonthlyPrice)
 	loadInt("company_discount_percent", &s.settings.CompanyDiscountPercent)
 	loadInt("subscription_warn_days", &s.settings.SubscriptionWarnDays)
+	loadInt("match_radius_km", &s.settings.MatchRadiusKm)
+	loadInt("dispatch_wave_size", &s.settings.DispatchWaveSize)
+}
+
+// radiusKm is how far from a job a worker may be and still be rung.
+func (s *Store) radiusKm() float64 {
+	if s.settings.MatchRadiusKm < 1 {
+		return matchRadiusKm
+	}
+	return float64(s.settings.MatchRadiusKm)
 }
 
 // ---- Users ------------------------------------------------------------------
@@ -550,6 +573,14 @@ func (s *Store) UpdateSettings(p SettingsPatch) models.Settings {
 	if p.SubscriptionWarnDays != nil && *p.SubscriptionWarnDays >= 0 {
 		s.settings.SubscriptionWarnDays = *p.SubscriptionWarnDays
 		save("subscription_warn_days", *p.SubscriptionWarnDays)
+	}
+	if p.MatchRadiusKm != nil && *p.MatchRadiusKm >= 1 && *p.MatchRadiusKm <= maxMatchRadiusKm {
+		s.settings.MatchRadiusKm = *p.MatchRadiusKm
+		save("match_radius_km", *p.MatchRadiusKm)
+	}
+	if p.DispatchWaveSize != nil && *p.DispatchWaveSize >= 0 && *p.DispatchWaveSize <= maxDispatchWaveSize {
+		s.settings.DispatchWaveSize = *p.DispatchWaveSize
+		save("dispatch_wave_size", *p.DispatchWaveSize)
 	}
 	return s.settings
 }

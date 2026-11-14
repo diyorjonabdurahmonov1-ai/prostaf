@@ -557,6 +557,12 @@ func migrate(db *sql.DB) {
 		// phone. See Store.BatchState.
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS batch_started BOOLEAN NOT NULL DEFAULT FALSE`,
 
+		// Who cancelled an order and (from the office) why, and when the worker
+		// or firm answered it. Rows from before these stay empty.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancelled_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS responded_at TIMESTAMPTZ`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

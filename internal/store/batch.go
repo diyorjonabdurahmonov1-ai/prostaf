@@ -97,7 +97,7 @@ func (s *Store) BatchOrders(batchID string) []models.Order {
 	if batchID == "" {
 		return nil
 	}
-	rows, err := s.db.Query("SELECT "+orderCols+" FROM orders WHERE batch_id=$1 ORDER BY created_at", batchID)
+	rows, err := s.db.Query("SELECT "+orderReadCols+" FROM orders WHERE batch_id=$1 ORDER BY created_at", batchID)
 	if err != nil {
 		return nil
 	}

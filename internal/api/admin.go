@@ -718,6 +718,10 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		CompanyMonthlyPrice    *int64 `json:"company_monthly_price"`
 		CompanyDiscountPercent *int   `json:"company_discount_percent"`
 		SubscriptionWarnDays   *int   `json:"subscription_warn_days"`
+		// How far a worker may be from a job and still be rung, and how many
+		// are rung per wave, nearest first (0 = everybody at once).
+		MatchRadiusKm    *int `json:"match_radius_km"`
+		DispatchWaveSize *int `json:"dispatch_wave_size"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -729,6 +733,8 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 		CompanyMonthlyPrice:    in.CompanyMonthlyPrice,
 		CompanyDiscountPercent: in.CompanyDiscountPercent,
 		SubscriptionWarnDays:   in.SubscriptionWarnDays,
+		MatchRadiusKm:          in.MatchRadiusKm,
+		DispatchWaveSize:       in.DispatchWaveSize,
 	})
 	writeJSON(w, http.StatusOK, settings)
 }

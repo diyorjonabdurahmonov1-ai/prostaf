@@ -128,14 +128,17 @@ func (s *Store) HasHiredCompany(customerID, companyID string) bool {
 func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Order, error) {
 	var o models.Order
 	var invitedIDs, rejectedIDs, images, targetIDs string
-	var inviteExpires sql.NullTime
+	var inviteExpires, responded sql.NullTime
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
 		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs,
-		&o.BatchID, &o.BatchSize)
+		&o.BatchID, &o.BatchSize, &o.CancelledBy, &o.CancelReason, &responded)
 	if err != nil {
 		return nil, err
+	}
+	if responded.Valid {
+		o.RespondedAt = &responded.Time
 	}
 	// A row from before the column existed, or a lone order: one of one.
 	if o.BatchSize < 1 {
@@ -157,6 +160,10 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 }
 
 const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, description, image_url, customer_phone, worker_phone, lat, lng, status, invited_worker_ids, invite_expires_at, commission_amount, created_at, customer_name, price, rejected_worker_ids, images, target_worker_ids, batch_id, batch_size"
+
+// orderReadCols is what scanOrder reads: the columns an order is written with,
+// plus the ones only ever set later in its life.
+const orderReadCols = orderCols + ", cancelled_by, cancel_reason, responded_at"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -331,8 +338,18 @@ func (s *Store) CompanyRespond(orderID, companyUserID string, accept bool) (*mod
 	if !accept {
 		o.Status = models.StatusCancelled
 		o.InviteExpiresAt = nil
-		s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL WHERE id=$2",
-			models.StatusCancelled, orderID)
+		res, err := s.db.Exec(
+			`UPDATE orders SET status=$1, invite_expires_at=NULL, cancelled_by='company',
+			        responded_at=NOW(), closed_at=NOW()
+			 WHERE id=$2 AND status=$3`,
+			models.StatusCancelled, orderID, models.StatusPending)
+		if err != nil {
+			return nil, ErrConflict
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, ErrConflict
+		}
+		o.CancelledBy = CancelledByCompany
 		return o, nil
 	}
 
@@ -342,7 +359,7 @@ func (s *Store) CompanyRespond(orderID, companyUserID string, accept bool) (*mod
 	// Guarded, for the same reason the worker's accept is: two taps from the
 	// same firm on two devices must settle to one answer.
 	res, err := s.db.Exec(
-		`UPDATE orders SET status=$1, worker_phone=$2 WHERE id=$3 AND status=$4`,
+		`UPDATE orders SET status=$1, worker_phone=$2, responded_at=NOW() WHERE id=$3 AND status=$4`,
 		models.StatusAccepted, cp.Phone, orderID, models.StatusPending)
 	if err != nil {
 		return nil, ErrConflict
@@ -390,7 +407,7 @@ func normalizeOrderPhotos(o *models.Order) {
 
 // GetOrder returns one order by id.
 func (s *Store) GetOrder(orderID string) (*models.Order, bool) {
-	o, err := s.scanOrder(s.db.QueryRow("SELECT "+orderCols+" FROM orders WHERE id=$1", orderID))
+	o, err := s.scanOrder(s.db.QueryRow("SELECT "+orderReadCols+" FROM orders WHERE id=$1", orderID))
 	if err != nil {
 		return nil, false
 	}
@@ -400,7 +417,7 @@ func (s *Store) GetOrder(orderID string) (*models.Order, bool) {
 
 // ListOrdersByCustomer returns a customer's own orders, newest first.
 func (s *Store) ListOrdersByCustomer(customerID string) []models.Order {
-	rows, err := s.db.Query("SELECT "+orderCols+" FROM orders WHERE customer_id=$1 ORDER BY created_at DESC", customerID)
+	rows, err := s.db.Query("SELECT "+orderReadCols+" FROM orders WHERE customer_id=$1 ORDER BY created_at DESC", customerID)
 	if err != nil {
 		return nil
 	}
@@ -424,7 +441,7 @@ func (s *Store) ListCompanyOrders(companyUserID string) []models.Order {
 	if !ok {
 		return nil
 	}
-	rows, err := s.db.Query("SELECT "+orderCols+" FROM orders WHERE company_id=$1 ORDER BY created_at DESC", cp.ID)
+	rows, err := s.db.Query("SELECT "+orderReadCols+" FROM orders WHERE company_id=$1 ORDER BY created_at DESC", cp.ID)
 	if err != nil {
 		return nil
 	}
@@ -456,7 +473,7 @@ func (s *Store) ListWorkerOrders(workerUserID string, since time.Time) []models.
 		return nil
 	}
 	// We need to check both worker_id and invited_worker_ids (JSON array).
-	rows, err := s.db.Query("SELECT " + orderCols + " FROM orders ORDER BY created_at DESC")
+	rows, err := s.db.Query("SELECT " + orderReadCols + " FROM orders ORDER BY created_at DESC")
 	if err != nil {
 		return nil
 	}
@@ -528,6 +545,11 @@ func (s *Store) existingWorkerIDs(ids []string) []string {
 // answer anyway — banned, offline, already on a job, unable to pay the
 // commission — which is checked by the caller.
 func matchesOrder(o *models.Order, wp *models.WorkerProfile) bool {
+	return matchesOrderWithin(o, wp, matchRadiusKm)
+}
+
+// matchesOrderWithin is matchesOrder with the radius the office has set.
+func matchesOrderWithin(o *models.Order, wp *models.WorkerProfile, radiusKm float64) bool {
 	// You cannot be called to your own job.
 	if wp.UserID == o.CustomerID {
 		return false
@@ -542,7 +564,7 @@ func matchesOrder(o *models.Order, wp *models.WorkerProfile) bool {
 	if o.Gender != "any" && wp.Gender != o.Gender {
 		return false
 	}
-	return geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng) <= matchRadiusKm
+	return geo.DistanceKm(o.Lat, o.Lng, wp.Lat, wp.Lng) <= radiusKm
 }
 
 /**
@@ -665,13 +687,14 @@ func (s *Store) shortlistFor(o *models.Order, engaged map[string]bool) []models.
 		return nil
 	}
 	defer rows.Close()
+	radius := s.radiusKm()
 	var out []models.WorkerProfile
 	for rows.Next() {
 		wp, err := s.scanWorker(rows)
 		if err != nil {
 			continue
 		}
-		if !matchesOrder(o, wp) {
+		if !matchesOrderWithin(o, wp, radius) {
 			continue
 		}
 		// A sibling order of the same request is already waiting on them.
@@ -744,6 +767,16 @@ func (s *Store) DispatchWave(orderID string) (*models.Order, []string, bool) {
 		}
 	}
 
+	// Nearest first. The candidates come sorted by distance, so capping a wave
+	// rings the closest few and leaves the rest for the next wave, twelve
+	// seconds on, if nobody has taken the job by then. Workers the customer
+	// picked by hand are all rung at once: there is nobody to prefer among them.
+	if wave := s.settings.DispatchWaveSize; wave > 0 && len(o.TargetWorkerIDs) == 0 {
+		if share == 0 || share > wave {
+			share = wave
+		}
+	}
+
 	var newProfileIDs, newUserIDs []string
 	for _, wp := range candidates {
 		if containsStr(o.InvitedWorkerIDs, wp.ID) || containsStr(o.RejectedWorkerIDs, wp.ID) {
@@ -788,6 +821,46 @@ func (s *Store) Redispatch(orderID, customerID string) (*models.Order, error) {
 	if o.CustomerID != customerID {
 		return nil, ErrForbidden
 	}
+	return s.reopen(o)
+}
+
+// reopen puts an order nobody is working on back into the search.
+func (s *Store) reopen(o *models.Order) (*models.Order, error) {
+	// A firm's order is a request to that one firm; there is nobody to search.
+	if o.CompanyID != "" {
+		return nil, ErrConflict
+	}
+	expires := time.Now().Add(InviteTTL)
+
+	// The worker who took the job dropped it. The order is cancelled with their
+	// name still on it, and "find me somebody else" has to mean exactly that:
+	// the search re-opens for everyone except the one who walked away.
+	if o.Status == models.StatusCancelled && o.WorkerID != "" && o.CancelledBy != CancelledByCustomer &&
+		o.CancelledBy != CancelledByAdmin {
+		dropped := []string{}
+		if wp, ok := s.GetWorkerByUser(o.WorkerID); ok {
+			dropped = append(dropped, wp.ID)
+		}
+		res, err := s.db.Exec(
+			`UPDATE orders SET status=$1, invited_worker_ids='[]', rejected_worker_ids=$2, invite_expires_at=$3,
+			        worker_id='', worker_phone='', cancelled_by='', cancel_reason='', responded_at=NULL, closed_at=NULL
+			 WHERE id=$4 AND status='cancelled' AND worker_id=$5`,
+			models.StatusMatching, marshalJSON(dropped), expires, o.ID, o.WorkerID)
+		if err != nil {
+			return nil, ErrConflict
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, ErrConflict
+		}
+		o.Status = models.StatusMatching
+		o.InvitedWorkerIDs = []string{}
+		o.RejectedWorkerIDs = dropped
+		o.InviteExpiresAt = &expires
+		o.WorkerID, o.WorkerPhone = "", ""
+		o.CancelledBy, o.CancelReason, o.RespondedAt = "", "", nil
+		return o, nil
+	}
+
 	switch o.Status {
 	case models.StatusPending, models.StatusMatching, models.StatusInvited,
 		models.StatusExpired,
@@ -799,11 +872,11 @@ func (s *Store) Redispatch(orderID, customerID string) (*models.Order, error) {
 	default:
 		return nil, ErrConflict
 	}
-	expires := time.Now().Add(InviteTTL)
 	res, err := s.db.Exec(
-		`UPDATE orders SET status=$1, invited_worker_ids='[]', rejected_worker_ids='[]', invite_expires_at=$2
-		 WHERE id=$3 AND worker_id=''`,
-		models.StatusMatching, expires, orderID)
+		`UPDATE orders SET status=$1, invited_worker_ids='[]', rejected_worker_ids='[]', invite_expires_at=$2,
+		        closed_at=NULL
+		 WHERE id=$3 AND worker_id='' AND status IN ('pending','matching','invited','expired','rejected')`,
+		models.StatusMatching, expires, o.ID)
 	if err != nil {
 		return nil, ErrConflict
 	}
@@ -867,7 +940,8 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	// The winner is decided by the database, not by the order of the checks
 	// above — two workers reaching this line together both pass every check.
 	res, err := s.db.Exec(
-		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL, commission_amount=$4
+		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL, commission_amount=$4,
+		        responded_at=NOW()
 		 WHERE id=$5 AND worker_id='' AND status IN ('matching','invited')`,
 		models.StatusAccepted, workerUserID, wp.Phone, commission, orderID)
 	if err != nil {
@@ -1027,10 +1101,31 @@ func (s *Store) Complete(orderID, actorID string) (*models.Order, error) {
 	if o.CustomerID != actorID {
 		return nil, ErrForbidden
 	}
+	return s.complete(o)
+}
+
+// complete closes a job that is actually under way.
+//
+// It used to write "completed" over whatever was there, so a cancelled order,
+// or one still looking for a worker, could be closed as done — and then rated,
+// and counted as a finished job in every report. Only a job somebody took can
+// be finished. Asking twice is not an error: the second answer is the first.
+func (s *Store) complete(o *models.Order) (*models.Order, error) {
+	if o.Status == models.StatusCompleted {
+		return o, nil
+	}
+	res, err := s.db.Exec(
+		`UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW()
+		 WHERE id=$2 AND status IN ('accepted','in_progress')`,
+		models.StatusCompleted, o.ID)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrConflict
+	}
 	o.Status = models.StatusCompleted
 	o.InviteExpiresAt = nil
-	s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW() WHERE id=$2",
-		models.StatusCompleted, orderID)
 	// The job is over, so its photos are: see order_photos.go. Nothing here can
 	// touch a profile picture — only files stamped with this order's id go.
 	s.purgeOnClose(o)
@@ -1073,30 +1168,72 @@ func (s *Store) CompleteByWorker(orderID, workerUserID string) (*models.Order, e
 	return o, nil
 }
 
-// Cancel marks an order cancelled.
-func (s *Store) Cancel(orderID, actorID string) (*models.Order, error) {
-	return s.setTerminal(orderID, actorID, models.StatusCancelled)
-}
+// Who called an order off — models.Order.CancelledBy.
+const (
+	CancelledByCustomer = "customer"
+	CancelledByWorker   = "worker"
+	CancelledByCompany  = "company"
+	CancelledByAdmin    = "admin"
+)
 
-func (s *Store) setTerminal(orderID, actorID, status string) (*models.Order, error) {
+// Cancel marks an order cancelled, and records who did it.
+//
+// Who may cancel depends on where the order is. The customer may withdraw it
+// at any point before it is finished — including a search that already ran out,
+// which is how a place in a multi-worker request is given up. The worker or
+// firm holding it may drop it once it is theirs. Nobody may cancel a finished
+// job: that used to be possible, and turned a completed, rated order back into
+// a cancelled one.
+func (s *Store) Cancel(orderID, actorID string) (*models.Order, error) {
 	o, ok := s.GetOrder(orderID)
 	if !ok {
 		return nil, ErrNotFound
 	}
-	// Allow customer, worker, or company owner.
-	isCompanyOwner := false
-	if o.CompanyID != "" {
+	by := ""
+	switch {
+	case o.CustomerID == actorID:
+		by = CancelledByCustomer
+	case o.WorkerID != "" && o.WorkerID == actorID:
+		by = CancelledByWorker
+	case o.CompanyID != "":
 		if cp, ok := s.GetCompanyByID(o.CompanyID); ok && cp.UserID == actorID {
-			isCompanyOwner = true
+			by = CancelledByCompany
 		}
 	}
-	if o.CustomerID != actorID && o.WorkerID != actorID && !isCompanyOwner {
+	if by == "" {
 		return nil, ErrForbidden
 	}
-	o.Status = status
+	return s.cancel(o, by, "")
+}
+
+// cancel is the one place an order becomes cancelled.
+func (s *Store) cancel(o *models.Order, by, reason string) (*models.Order, error) {
+	// Asking twice is not an error, and does not rewrite who cancelled first.
+	if o.Status == models.StatusCancelled {
+		return o, nil
+	}
+	allowed := []string{models.StatusAccepted, models.StatusInProgress}
+	switch by {
+	case CancelledByCustomer, CancelledByAdmin:
+		allowed = append(allowed, models.StatusPending, models.StatusMatching, models.StatusInvited,
+			models.StatusExpired, models.StatusRejected)
+	case CancelledByCompany:
+		allowed = append(allowed, models.StatusPending)
+	}
+	res, err := s.db.Exec(
+		`UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW(), cancelled_by=$2, cancel_reason=$3
+		 WHERE id=$4 AND status = ANY($5)`,
+		models.StatusCancelled, by, reason, o.ID, allowed)
+	if err != nil {
+		return nil, ErrConflict
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrConflict
+	}
+	o.Status = models.StatusCancelled
 	o.InviteExpiresAt = nil
-	s.db.Exec("UPDATE orders SET status=$1, invite_expires_at=NULL, closed_at=NOW() WHERE id=$2",
-		status, orderID)
+	o.CancelledBy = by
+	o.CancelReason = reason
 	s.purgeOnClose(o)
 	return o, nil
 }

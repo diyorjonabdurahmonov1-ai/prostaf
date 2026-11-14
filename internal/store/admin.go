@@ -671,6 +671,22 @@ type AdminOrder struct {
 // ListAllOrders returns every order, newest first, enriched with names and a
 // period bucket label. period is "day" (default), "month" or "year".
 func (s *Store) ListAllOrders(period, status string) []AdminOrder {
+	return s.adminOrders(period, status, "")
+}
+
+// GetAdminOrder is one order as the office sees it: names joined in.
+func (s *Store) GetAdminOrder(orderID string) (*AdminOrder, bool) {
+	if orderID == "" {
+		return nil, false
+	}
+	found := s.adminOrders("day", "", orderID)
+	if len(found) == 0 {
+		return nil, false
+	}
+	return &found[0], true
+}
+
+func (s *Store) adminOrders(period, status, orderID string) []AdminOrder {
 	format := "YYYY-MM-DD"
 	switch period {
 	case "month":
@@ -682,6 +698,7 @@ func (s *Store) ListAllOrders(period, status string) []AdminOrder {
 		o.description, o.image_url, o.customer_phone, o.worker_phone, o.lat, o.lng, o.status,
 		o.invited_worker_ids, o.invite_expires_at, o.commission_amount, o.created_at,
 		COALESCE(o.customer_name,''), o.price,
+		o.batch_id, o.batch_size, o.cancelled_by, o.cancel_reason, o.responded_at,
 		to_char(o.created_at, '` + format + `'),
 		COALESCE(NULLIF(cu.name,''), o.customer_name, ''), COALESCE(cu.gmail,''),
 		COALESCE(w.full_name,''), COALESCE(co.name,''), COALESCE(cat.name_uz,'')
@@ -691,7 +708,10 @@ func (s *Store) ListAllOrders(period, status string) []AdminOrder {
 		LEFT JOIN companies co ON co.id = o.company_id
 		LEFT JOIN categories cat ON cat.id = o.category_id`
 	args := []any{}
-	if status != "" && status != "all" {
+	if orderID != "" {
+		q += " WHERE o.id=$1"
+		args = append(args, orderID)
+	} else if status != "" && status != "all" {
 		q += " WHERE o.status=$1"
 		args = append(args, status)
 	}
@@ -707,11 +727,12 @@ func (s *Store) ListAllOrders(period, status string) []AdminOrder {
 	for rows.Next() {
 		var ao AdminOrder
 		var invitedIDs, joinedName string
-		var inviteExpires sql.NullTime
+		var inviteExpires, responded sql.NullTime
 		err := rows.Scan(&ao.ID, &ao.CustomerID, &ao.WorkerID, &ao.CompanyID, &ao.CategoryID,
 			&ao.Gender, &ao.Description, &ao.ImageURL, &ao.CustomerPhone, &ao.WorkerPhone,
 			&ao.Lat, &ao.Lng, &ao.Status, &invitedIDs, &inviteExpires, &ao.CommissionAmount,
-			&ao.CreatedAt, &ao.CustomerName, &ao.Price, &ao.Bucket, &joinedName, &ao.CustomerEmail,
+			&ao.CreatedAt, &ao.CustomerName, &ao.Price,
+			&ao.BatchID, &ao.BatchSize, &ao.CancelledBy, &ao.CancelReason, &responded, &ao.Bucket, &joinedName, &ao.CustomerEmail,
 			&ao.WorkerName, &ao.CompanyName, &ao.CategoryName)
 		if err != nil {
 			continue
@@ -719,6 +740,9 @@ func (s *Store) ListAllOrders(period, status string) []AdminOrder {
 		ao.InvitedWorkerIDs = unmarshalStrings(invitedIDs)
 		if inviteExpires.Valid {
 			ao.InviteExpiresAt = &inviteExpires.Time
+		}
+		if responded.Valid {
+			ao.RespondedAt = &responded.Time
 		}
 		if joinedName != "" {
 			ao.CustomerName = joinedName
@@ -775,4 +799,7 @@ type SettingsPatch struct {
 	CompanyMonthlyPrice    *int64
 	CompanyDiscountPercent *int
 	SubscriptionWarnDays   *int
+
+	MatchRadiusKm    *int
+	DispatchWaveSize *int
 }

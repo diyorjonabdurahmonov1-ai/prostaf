@@ -364,6 +364,16 @@ type Order struct {
 	// worker's "waiting for the team" message. Derived on read.
 	BatchFound int `json:"batch_found,omitempty"`
 
+	// CancelledBy says who called a cancelled order off: "customer", "worker",
+	// "company" or "admin". Empty on an order that was not cancelled, and on
+	// ones cancelled before this was recorded.
+	CancelledBy string `json:"cancelled_by,omitempty"`
+	// CancelReason is the note an operator left when cancelling from the office.
+	CancelReason string `json:"cancel_reason,omitempty"`
+	// RespondedAt is when a worker took the job, or a firm answered it either
+	// way — what "how long did the customer wait" is measured to.
+	RespondedAt *time.Time `json:"responded_at,omitempty"`
+
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.
 	RejectedWorkerIDs []string `json:"-"`
@@ -514,6 +524,12 @@ type Settings struct {
 	// SubscriptionWarnDays is how long before a subscription expires the firm is
 	// warned — seven, so it has a week to pay.
 	SubscriptionWarnDays int `json:"subscription_warn_days"`
+	// MatchRadiusKm is how far from the job a worker may be and still be rung.
+	MatchRadiusKm int `json:"match_radius_km"`
+	// DispatchWaveSize is how many workers one wave rings, nearest first; the
+	// next nearest are rung a wave later if nobody has taken the job. Zero
+	// rings everybody in the radius at once.
+	DispatchWaveSize int `json:"dispatch_wave_size"`
 }
 
 // Alert levels.
