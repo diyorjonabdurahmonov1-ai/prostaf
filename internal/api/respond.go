@@ -90,6 +90,12 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed")
 	case errors.Is(err, store.ErrBadRequest):
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid request")
+	case errors.Is(err, store.ErrActiveOrders):
+		writeError(w, http.StatusConflict, "active_orders",
+			"Tugallanmagan buyurtmangiz bor. Avval uni yakunlang yoki bekor qiling, keyin akkauntni o'chiring.")
+	case errors.Is(err, store.ErrAdminAccount):
+		writeError(w, http.StatusForbidden, "admin_account",
+			"Administrator akkauntini ilovadan o'chirib bo'lmaydi.")
 	case errors.Is(err, store.ErrInsufficientBalance):
 		// The exact figure lives on the alert banner, which knows the setting;
 		// this only has to say which of the two things went wrong.

@@ -68,6 +68,28 @@ func (s *Server) handleSetPushToken(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// POST /me/delete — body { confirm: true }. Erases the caller's own account;
+// see Store.DeleteAccount for what that means. It needs an explicit confirm so
+// that no stray request can do it.
+func (s *Server) handleDeleteAccount(w http.ResponseWriter, r *http.Request) {
+	u := userFrom(r)
+	var body struct {
+		Confirm bool `json:"confirm"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !body.Confirm {
+		writeError(w, http.StatusBadRequest, "bad_request", "confirm must be true")
+		return
+	}
+	if err := s.store.DeleteAccount(u.ID); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 // transportFor names the path a push to this user would take right now.
 func (s *Server) transportFor(userID string) string {
 	if s.fcm != nil && s.store.GetDeviceToken(userID) != "" {

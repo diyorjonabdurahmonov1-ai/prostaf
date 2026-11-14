@@ -20,6 +20,11 @@ import (
 var (
 	ErrNotFound            = errors.New("not_found")
 	ErrConflict            = errors.New("conflict")
+	// ErrActiveOrders: the account still has a job in progress, as customer,
+	// worker or firm, and cannot be deleted until it ends.
+	ErrActiveOrders = errors.New("active_orders")
+	// ErrAdminAccount: the office's own accounts are not deleted from the app.
+	ErrAdminAccount = errors.New("admin_account")
 	ErrForbidden           = errors.New("forbidden")
 	ErrBadRequest          = errors.New("bad_request")
 	ErrInsufficientBalance = errors.New("insufficient_balance")
