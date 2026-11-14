@@ -53,7 +53,7 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.atmos.Enabled() {
-		s.devTopup(w, u.ID, body.Amount)
+		s.devTopup(w, r, u.ID, body.Amount)
 		return
 	}
 	payment, err := s.openGatewayPayment(r, store.PaymentRequest{
@@ -83,14 +83,14 @@ func (s *Server) handleTopup(w http.ResponseWriter, r *http.Request) {
 // The firm's screen reads these on every open rather than remembering them: the
 // prices are the office's to change, and a stale card would mean a firm
 // agreeing to one number and being charged another.
-func (s *Server) handleSubscriptionPlans(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSubscriptionPlans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"plans": s.store.ListSubscriptionPlans(true),
 		// "Can a firm buy a month right now", not "is Atmos configured". Those
 		// were the same question until the development path below existed; with
 		// no gateway and DEV_MODE on, a plan is bought instantly and the flag
 		// saying otherwise would grey out a button that works.
-		"payments_enabled": s.atmos.Enabled() || s.cfg.DevMode,
+		"payments_enabled": s.atmos.Enabled() || s.devAllowed(r),
 	})
 }
 
@@ -134,7 +134,7 @@ func (s *Server) handleCompanySubscriptionCheckout(w http.ResponseWriter, r *htt
 	// out of free jobs was simply stuck, on every environment. A top-up has
 	// always had this path; there was no reason the other purchase did not.
 	if !s.atmos.Enabled() {
-		s.devSubscribe(w, u.ID, plan)
+		s.devSubscribe(w, r, u.ID, plan)
 		return
 	}
 
@@ -213,8 +213,8 @@ func (s *Server) openGatewayPayment(r *http.Request, req store.PaymentRequest) (
 }
 
 // devTopup is the no-gateway path: credit it and move on.
-func (s *Server) devTopup(w http.ResponseWriter, userID string, amount int64) {
-	if !s.cfg.DevMode {
+func (s *Server) devTopup(w http.ResponseWriter, r *http.Request, userID string, amount int64) {
+	if !s.devAllowed(r) {
 		writeError(w, http.StatusServiceUnavailable, "payments_unavailable",
 			"To'lov tizimi sozlanmagan. Operatorga murojaat qiling.")
 		return
@@ -236,8 +236,8 @@ func (s *Server) devTopup(w http.ResponseWriter, userID string, amount int64) {
 // event and the "To'lov qabul qilindi" notification all come out of one code
 // path. Crediting the firm inline instead would work today and quietly drift
 // from the real thing the moment either side is touched.
-func (s *Server) devSubscribe(w http.ResponseWriter, userID string, plan *models.SubscriptionPlan) {
-	if !s.cfg.DevMode {
+func (s *Server) devSubscribe(w http.ResponseWriter, r *http.Request, userID string, plan *models.SubscriptionPlan) {
+	if !s.devAllowed(r) {
 		writeError(w, http.StatusServiceUnavailable, "payments_unavailable",
 			"To'lov tizimi sozlanmagan. Operatorga murojaat qiling.")
 		return

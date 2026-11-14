@@ -124,7 +124,7 @@ func NewServer(cfg config.Config, st *store.Store, hub *sse.Hub) *Server {
 		log.Print("push: firebase not configured — falling back to Expo, " +
 			"which cannot deliver to a closed Android app")
 	}
-	s.handler = recoverMW(logMW(corsMW(cfg.AllowedOrigins)(s.routes())))
+	s.handler = recoverMW(logMW(securityMW(bodyLimitMW(corsMW(cfg.AllowedOrigins)(s.routes())))))
 	return s
 }
 
@@ -250,6 +250,7 @@ func (s *Server) routes() http.Handler {
 
 	// Admin.
 	mux.HandleFunc("GET "+p+"/admin/stats", s.admin(s.handleAdminStats))
+	mux.HandleFunc("GET "+p+"/admin/security-check", s.admin(s.handleAdminSecurityCheck))
 	// Who is holding a socket right now — the missing half of "why did the
 	// order not reach the worker?".
 	mux.HandleFunc("GET "+p+"/admin/realtime", s.admin(s.handleAdminRealtime))
