@@ -337,18 +337,20 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 		// after its two minutes are up is noise the worker cannot act on.
 		if s.fcm != nil {
 			if tok := s.store.GetDeviceToken(wuid); tok != "" {
-				go s.sendFCM(tok, "Yangi buyurtma!", order.Description, data, store.InviteTTL)
+				go s.sendFCM(tok, s.store.GetPushChannel(wuid), "Yangi buyurtma!", order.Description, data, store.InviteTTL)
 				continue
 			}
 		}
 		if tok := s.store.GetPushToken(wuid); tok != "" {
-			pushMessages = append(pushMessages, push.Urgent(
+			m := push.Urgent(
 				tok,
 				"Yangi buyurtma!",
 				order.Description,
 				data,
 				int(store.InviteTTL.Seconds()),
-			))
+			)
+			m.ChannelID = s.store.GetPushChannel(wuid)
+			pushMessages = append(pushMessages, m)
 		}
 	}
 	push.Send(pushMessages...)

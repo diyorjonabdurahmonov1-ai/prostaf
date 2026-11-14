@@ -580,6 +580,12 @@ func migrate(db *sql.DB) {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_no_shows_worker ON worker_no_shows(worker_user_id)`,
 
+		// The Android notification channel this phone's app has registered for
+		// orders. A channel's sound cannot be changed once it exists, so a new
+		// sound means a new channel, and the server has to know which one each
+		// phone actually has. Empty means the original "orders".
+		`ALTER TABLE users ADD COLUMN IF NOT EXISTS push_channel TEXT NOT NULL DEFAULT ''`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,
