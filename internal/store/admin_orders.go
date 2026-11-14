@@ -49,9 +49,10 @@ func (s *Store) AdminRedispatch(orderID string) (*models.Order, error) {
 // AdminAssign hands an order nobody is working on to one worker, by the
 // worker's user id (a profile id is accepted too).
 //
-// No commission is taken: the worker did not choose this job, the office did.
-// The worker must still be somebody who could do it — not banned, and not
-// already on another job.
+// The worker is charged exactly as if they had accepted it themselves: a free
+// trial job is spent first, otherwise the commission comes off the wallet. So
+// the same rules apply — not banned, not already on another job, and able to
+// pay the commission.
 func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.WorkerProfile, error) {
 	o, ok := s.GetOrder(orderID)
 	if !ok {
@@ -76,6 +77,14 @@ func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.Work
 	if s.WorkerIsBusy(wp.UserID) {
 		return nil, nil, ErrConflict
 	}
+	if !s.canWorkerAccept(wp) {
+		return nil, nil, ErrInsufficientBalance
+	}
+	base := o.Price
+	if base <= 0 {
+		base = wp.PriceMin
+	}
+	commission := base * int64(s.settings.CommissionPercent) / 100
 	// Whatever left the order without a worker — expired, declined, dropped —
 	// reopen clears it; an order still searching is taken as it stands.
 	switch o.Status {
@@ -87,14 +96,18 @@ func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.Work
 	}
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL,
-		        commission_amount=0, responded_at=NOW()
-		 WHERE id=$4 AND worker_id='' AND status IN ('pending','matching','invited')`,
-		models.StatusAccepted, wp.UserID, wp.Phone, orderID)
+		        commission_amount=$4, responded_at=NOW()
+		 WHERE id=$5 AND worker_id='' AND status IN ('pending','matching','invited')`,
+		models.StatusAccepted, wp.UserID, wp.Phone, commission, orderID)
 	if err != nil {
 		return nil, nil, ErrConflict
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, nil, ErrConflict
+	}
+	// Charged only once the order is theirs, as in Accept.
+	if charged := s.chargeWorkerAcceptance(wp, commission); charged != commission {
+		s.db.Exec("UPDATE orders SET commission_amount=$1 WHERE id=$2", charged, orderID)
 	}
 	o, _ = s.GetOrder(orderID)
 	return o, wp, nil

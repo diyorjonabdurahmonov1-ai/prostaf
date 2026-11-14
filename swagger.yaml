@@ -1675,7 +1675,7 @@ paths:
   /admin/orders/{id}/assign:
     post:
       tags: [Admin]
-      summary: Hand the order to one worker; no commission is taken
+      summary: Hand the order to one worker; charged like an ordinary accept
       parameters:
         - name: id
           in: path
