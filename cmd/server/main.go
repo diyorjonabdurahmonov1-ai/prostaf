@@ -94,6 +94,9 @@ func main() {
 	// over. Nothing else on the platform is time-driven — every other message is
 	// a reaction to a request — which is why this needs its own loop.
 	go srv.WatchSubscriptions()
+	// Said in the log at every start, so a platform running on a default key or
+	// password is never a secret the server keeps to itself.
+	srv.LogSecurityChecks()
 
 	httpServer := &http.Server{
 		Addr:              ":" + cfg.Port,

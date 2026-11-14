@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"strings"
+
+	"prostaff/internal/store"
 )
 
 // POST /uploads — turn a picked image into a URL every account can load.
@@ -51,6 +53,15 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "data must be base64")
 		return
 	}
+	// The label the client wrote says what it hopes the bytes are. What they
+	// are is read from the bytes: a page or a script sent as "image/jpeg" used
+	// to be stored and served back under that label from this domain.
+	real := sniffImage(decoded)
+	if real == "" {
+		writeStoreError(w, store.ErrUnsupportedMedia)
+		return
+	}
+	mime = real
 
 	fileID, err := s.store.SaveFile(u.ID, mime, decoded)
 	if err != nil {
@@ -80,6 +91,9 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 
 	h := w.Header()
 	h.Set("Content-Type", f.Mime)
+	// An image is only ever an image: nothing in it may run if somebody opens
+	// the link in a browser, whatever the bytes turn out to contain.
+	h.Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	// Stored bytes never change under an id, so let every layer keep them —
 	// and for the same reason the id itself is a valid ETag.
 	h.Set("Cache-Control", "public, max-age=31536000, immutable")

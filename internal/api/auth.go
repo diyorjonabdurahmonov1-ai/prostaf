@@ -2,6 +2,7 @@ package api
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -141,12 +142,12 @@ func (s *Server) handleOTPRequest(w http.ResponseWriter, r *http.Request) {
 		// In dev the code comes back in the response, so a missing or broken SMS
 		// provider must not block sign-in. In production it has to be an error —
 		// otherwise the client waits for a message that will never arrive.
-		if !s.cfg.DevMode {
+		if !s.devAllowed(r) {
 			writeError(w, http.StatusBadGateway, "sms_failed", "could not send the verification code")
 			return
 		}
 	}
-	if s.cfg.DevMode {
+	if s.devAllowed(r) {
 		resp["dev_code"] = code
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -287,8 +288,8 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	hash := s.store.GetPasswordHash(u.ID)
 	authorized := passwordMatches(hash, body.Password)
 	if hash == "" {
-		authorized = email == s.cfg.AdminEmail &&
-			body.Password != "" && body.Password == s.cfg.AdminPassword
+		authorized = email == s.cfg.AdminEmail && body.Password != "" &&
+			subtle.ConstantTimeCompare([]byte(body.Password), []byte(s.cfg.AdminPassword)) == 1
 	}
 	if !authorized {
 		loginAttempts.fail(email)
@@ -345,12 +346,12 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.sendOTPCode(phone, code); err != nil {
 		log.Printf("forgot-password: sending to %s failed: %v", phone, err)
-		if !s.cfg.DevMode {
+		if !s.devAllowed(r) {
 			writeError(w, http.StatusBadGateway, "sms_failed", "could not send the verification code")
 			return
 		}
 	}
-	if s.cfg.DevMode {
+	if s.devAllowed(r) {
 		resp["dev_code"] = code
 	}
 	writeJSON(w, http.StatusOK, resp)

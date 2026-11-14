@@ -58,6 +58,7 @@ func corsMW(allowedOrigins []string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 			h := w.Header()
+			h.Add("Vary", "Origin")
 
 			if len(allowed) == 0 || allowed[strings.TrimRight(origin, "/")] {
 				h.Set("Access-Control-Allow-Origin", origin)
