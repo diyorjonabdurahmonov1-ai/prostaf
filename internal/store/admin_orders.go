@@ -96,7 +96,7 @@ func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.Work
 	}
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL,
-		        commission_amount=$4, responded_at=NOW()
+		        commission_amount=$4, responded_at=NOW(), arrived_at=NULL, free_trial_used=FALSE
 		 WHERE id=$5 AND worker_id='' AND status IN ('pending','matching','invited')`,
 		models.StatusAccepted, wp.UserID, wp.Phone, commission, orderID)
 	if err != nil {
@@ -106,8 +106,8 @@ func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.Work
 		return nil, nil, ErrConflict
 	}
 	// Charged only once the order is theirs, as in Accept.
-	if charged := s.chargeWorkerAcceptance(wp, commission); charged != commission {
-		s.db.Exec("UPDATE orders SET commission_amount=$1 WHERE id=$2", charged, orderID)
+	if charged, onTrial := s.chargeWorkerAcceptance(wp, commission); charged != commission || onTrial {
+		s.db.Exec("UPDATE orders SET commission_amount=$1, free_trial_used=$2 WHERE id=$3", charged, onTrial, orderID)
 	}
 	o, _ = s.GetOrder(orderID)
 	return o, wp, nil

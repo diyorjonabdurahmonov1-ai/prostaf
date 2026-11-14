@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"sort"
+	"strings"
 	"time"
 
 	"prostaff/internal/blob"
@@ -84,6 +85,13 @@ const (
 	maxDispatchWaveSize = 50
 )
 
+// defaultNoShowMinutes is how long a customer waits before they may report
+// that the worker never came, until the office sets another.
+const defaultNoShowMinutes = 30
+
+// ErrTooEarly is a no-show reported before the waiting time is up.
+var ErrTooEarly = errors.New("too_early")
+
 // Store wraps a PostgreSQL database with domain methods.
 type Store struct {
 	db  *sql.DB
@@ -110,6 +118,7 @@ func New(cfg config.Config, db *sql.DB, blobs *blob.Store) *Store {
 			SubscriptionWarnDays:   cfg.SubscriptionWarnDays,
 			MatchRadiusKm:          int(matchRadiusKm),
 			DispatchWaveSize:       defaultDispatchWaveSize,
+			NoShowMinutes:          defaultNoShowMinutes,
 		},
 	}
 	s.seed()
@@ -217,6 +226,19 @@ func (s *Store) loadSettings() {
 	loadInt("subscription_warn_days", &s.settings.SubscriptionWarnDays)
 	loadInt("match_radius_km", &s.settings.MatchRadiusKm)
 	loadInt("dispatch_wave_size", &s.settings.DispatchWaveSize)
+	loadInt("no_show_minutes", &s.settings.NoShowMinutes)
+	loadString := func(key string, dst *string) {
+		var val, v string
+		if s.db.QueryRow("SELECT value FROM settings WHERE key=$1", key).Scan(&val) != nil {
+			return
+		}
+		if json.Unmarshal([]byte(val), &v) == nil {
+			*dst = v
+		}
+	}
+	loadString("min_app_version", &s.settings.MinAppVersion)
+	loadString("android_store_url", &s.settings.AndroidStoreURL)
+	loadString("ios_store_url", &s.settings.IOSStoreURL)
 }
 
 // radiusKm is how far from a job a worker may be and still be rung.
@@ -275,6 +297,9 @@ func (s *Store) UserView(userID string) (*models.User, bool) {
 	}
 	if w := s.getWallet(userID); w != nil {
 		u.Wallet = w
+	}
+	if u.WorkerProfile != nil {
+		u.WorkerProfile.NoShowCount = s.NoShowCount(userID)
 	}
 	return u, true
 }
@@ -582,6 +607,24 @@ func (s *Store) UpdateSettings(p SettingsPatch) models.Settings {
 		s.settings.DispatchWaveSize = *p.DispatchWaveSize
 		save("dispatch_wave_size", *p.DispatchWaveSize)
 	}
+	if p.NoShowMinutes != nil && *p.NoShowMinutes >= 5 && *p.NoShowMinutes <= 240 {
+		s.settings.NoShowMinutes = *p.NoShowMinutes
+		save("no_show_minutes", *p.NoShowMinutes)
+	}
+	// Empty is a real value for all three: it switches the update prompt off,
+	// or leaves the button with nowhere to go.
+	if p.MinAppVersion != nil && validVersion(*p.MinAppVersion) {
+		s.settings.MinAppVersion = strings.TrimSpace(*p.MinAppVersion)
+		save("min_app_version", s.settings.MinAppVersion)
+	}
+	if p.AndroidStoreURL != nil && validStoreURL(*p.AndroidStoreURL) {
+		s.settings.AndroidStoreURL = strings.TrimSpace(*p.AndroidStoreURL)
+		save("android_store_url", s.settings.AndroidStoreURL)
+	}
+	if p.IOSStoreURL != nil && validStoreURL(*p.IOSStoreURL) {
+		s.settings.IOSStoreURL = strings.TrimSpace(*p.IOSStoreURL)
+		save("ios_store_url", s.settings.IOSStoreURL)
+	}
 	return s.settings
 }
 
@@ -693,4 +736,35 @@ func (s *Store) addRoleInternal(userID, role string) {
 // sortOrdersDesc sorts orders by created_at descending.
 func sortOrdersDesc(orders []models.Order) {
 	sort.Slice(orders, func(i, j int) bool { return orders[i].CreatedAt.After(orders[j].CreatedAt) })
+}
+
+// validVersion accepts "" or dotted numbers such as 1.4 or 2.0.11 — anything
+// else would lock every phone out, or nobody, depending on how it compared.
+func validVersion(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return true
+	}
+	parts := strings.Split(v, ".")
+	if len(parts) > 4 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" || len(p) > 6 {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// validStoreURL accepts "" or an https link, so the update button can never be
+// pointed at something a phone would refuse or that is not a web address.
+func validStoreURL(u string) bool {
+	u = strings.TrimSpace(u)
+	return u == "" || (strings.HasPrefix(u, "https://") && len(u) <= 300 && !strings.ContainsAny(u, " \n\t\"<>"))
 }

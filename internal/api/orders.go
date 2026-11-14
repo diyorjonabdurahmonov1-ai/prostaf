@@ -377,6 +377,7 @@ func (s *Server) handleCancel(w http.ResponseWriter, r *http.Request) {
 	// A customer giving up an empty place may be what completes the team.
 	s.settleBatch(order)
 	s.notifyOrderStatus(order)
+	s.notifyRefund(order)
 	// A worker walking away from a job is something the customer has to act
 	// on, and the socket event alone only reaches a phone that is open.
 	if order.CancelledBy == store.CancelledByWorker && order.WorkerID == u.ID {

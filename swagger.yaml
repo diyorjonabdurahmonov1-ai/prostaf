@@ -1721,6 +1721,46 @@ paths:
         "200":
           description: "{ ok, recipients }"
 
+  /app/version:
+    get:
+      tags: [App]
+      summary: Oldest app version still allowed, and where to get a newer one (public)
+      security: []
+      responses:
+        "200":
+          description: "{ min_version, android_url, ios_url } — min_version empty means no minimum"
+
+  /worker/orders/{id}/arrived:
+    post:
+      tags: [Worker]
+      summary: The worker has reached the customer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The order, with arrived_at set
+
+  /orders/{id}/no-show:
+    post:
+      tags: [Orders]
+      summary: The customer reports the worker never came; the job is offered to everybody else
+      description: Allowed from the order's no_show_after, and never once the worker has marked arrival. The worker's commission is not returned.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The re-opened order
+        "409":
+          description: Too early (code too_early), or the order is not in a state that allows this
+
   /admin/settings:
     get:
       tags: [Admin]
@@ -1743,6 +1783,16 @@ paths:
               properties:
                 commission_percent:
                   type: integer
+                no_show_minutes:
+                  type: integer
+                  description: Minutes a customer waits before a no-show may be reported (5-240)
+                min_app_version:
+                  type: string
+                  description: Oldest app version allowed, e.g. 1.4.0; empty for none
+                android_store_url:
+                  type: string
+                ios_store_url:
+                  type: string
                 match_radius_km:
                   type: integer
                   description: How far from a job a worker may be and still be rung (1-200)

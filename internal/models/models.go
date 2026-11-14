@@ -131,6 +131,9 @@ type WorkerProfile struct {
 	// accept FreeOrdersLimit of them with an empty wallet, after which the
 	// balance rules apply as normal.
 	FreeOrdersUsed  int       `json:"free_orders_used"`
+	// NoShowCount is how many times a customer reported that this worker took
+	// a job and never came. Filled only where a whole account is read.
+	NoShowCount int `json:"no_show_count,omitempty"`
 	FreeOrdersLimit int       `json:"free_orders_limit"`
 	CreatedAt       time.Time `json:"created_at"`
 }
@@ -373,6 +376,18 @@ type Order struct {
 	// RespondedAt is when a worker took the job, or a firm answered it either
 	// way — what "how long did the customer wait" is measured to.
 	RespondedAt *time.Time `json:"responded_at,omitempty"`
+	// ArrivedAt is when the worker said they had reached the customer.
+	ArrivedAt *time.Time `json:"arrived_at,omitempty"`
+	// NoShowAfter is the moment from which the customer may report that the
+	// worker never came and have the job offered to somebody else. Present
+	// only while that can still happen: a worker holds the job and has not
+	// arrived. Derived on read from the office's setting.
+	NoShowAfter *time.Time `json:"no_show_after,omitempty"`
+	// RefundedCommission is what a cancellation just gave back to the worker,
+	// and TrialRestored whether it gave back a free job instead. Set only on
+	// the order returned by that cancellation; never stored or serialised.
+	RefundedCommission int64 `json:"-"`
+	TrialRestored      bool  `json:"-"`
 
 	// RejectedWorkerIDs are the workers who declined; later broadcast waves skip
 	// them. Internal only, never serialised.
@@ -530,6 +545,15 @@ type Settings struct {
 	// next nearest are rung a wave later if nobody has taken the job. Zero
 	// rings everybody in the radius at once.
 	DispatchWaveSize int `json:"dispatch_wave_size"`
+	// NoShowMinutes is how long after a worker takes a job the customer must
+	// wait before reporting that nobody came.
+	NoShowMinutes int `json:"no_show_minutes"`
+	// MinAppVersion is the oldest version of the customer/worker app that may
+	// still be used; older ones are asked to update. Empty switches this off.
+	// The two links are where "update" sends them.
+	MinAppVersion   string `json:"min_app_version"`
+	AndroidStoreURL string `json:"android_store_url"`
+	IOSStoreURL     string `json:"ios_store_url"`
 }
 
 // Alert levels.
