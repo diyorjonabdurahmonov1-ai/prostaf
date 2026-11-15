@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"strings"
 
 	"prostaff/internal/models"
@@ -92,6 +93,39 @@ func (s *Store) FreeOrderLimit() int {
 	return s.settings.FreeOrderLimit
 }
 
+// freeLimitFor is how many trial jobs this document may take: the number the
+// office gave this one provider, if it did, otherwise the platform setting.
+func (s *Store) freeLimitFor(key string) int {
+	global := s.FreeOrderLimit()
+	if !hasDocument(key) {
+		return global
+	}
+	var override sql.NullInt64
+	s.db.QueryRow("SELECT limit_override FROM free_trials WHERE key=$1", key).Scan(&override)
+	if override.Valid && override.Int64 >= 0 {
+		return int(override.Int64)
+	}
+	return global
+}
+
+// SetFreeOrdersLimit gives one document its own allowance of trial jobs (nil
+// goes back to the platform setting). Spent jobs are kept: a provider who has
+// used 3 and is given 50 has 47 left.
+func (s *Store) SetFreeOrdersLimit(key string, limit *int) {
+	if !hasDocument(key) {
+		return
+	}
+	var v any
+	if limit != nil && *limit >= 0 {
+		v = *limit
+	}
+	s.db.Exec(`INSERT INTO free_trials (key, used, limit_override) VALUES ($1, 0, $2)
+		ON CONFLICT (key) DO UPDATE SET limit_override = $2`, key, v)
+}
+
+// FreeOrdersLimitFor is freeLimitFor for the API layer, which adds to it.
+func (s *Store) FreeOrdersLimitFor(key string) int { return s.freeLimitFor(key) }
+
 // freeOrdersUsed reads the ledger. A document with no row has used none, which
 // is also what an empty document reports — a legacy profile with no passport on
 // file has no trial to spend, because there is nothing to stop it being spent
@@ -111,7 +145,7 @@ func (s *Store) freeOrdersLeft(key string) int {
 	if !hasDocument(key) {
 		return 0
 	}
-	if n := s.FreeOrderLimit() - s.freeOrdersUsed(key); n > 0 {
+	if n := s.freeLimitFor(key) - s.freeOrdersUsed(key); n > 0 {
 		return n
 	}
 	return 0
@@ -124,7 +158,7 @@ func (s *Store) freeOrdersLeft(key string) int {
 // free job. The insert-then-update shape means a document with no row yet is
 // handled by the same call.
 func (s *Store) consumeFreeOrder(key string) bool {
-	limit := s.FreeOrderLimit()
+	limit := s.freeLimitFor(key)
 	if !hasDocument(key) || limit <= 0 {
 		return false
 	}

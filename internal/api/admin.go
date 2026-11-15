@@ -829,16 +829,22 @@ func (s *Server) handleAdminAllSubscriptions(w http.ResponseWriter, r *http.Requ
 	})
 }
 
-// POST /admin/users/{id}/free-orders — body { role, used }. Sets how many trial
-// jobs the account has spent.
+// POST /admin/users/{id}/free-orders — body { role, used?, limit?, add?,
+// reset_limit? }. `used` sets how many trial jobs the account has spent;
+// `limit` gives this one provider its own allowance, `add` raises it by that
+// many on top of what it has now, and `reset_limit` goes back to the platform
+// setting. Anything left out is not touched.
 //
 // The counter hangs off the identity document, not the account, precisely so it
 // cannot be reset by re-creating a profile — which means an honest mistake (a
 // trial burned on a test order) needs a deliberate way back. This is it.
 func (s *Server) handleAdminFreeOrders(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Role string `json:"role"`
-		Used int    `json:"used"`
+		Role       string `json:"role"`
+		Used       *int   `json:"used"`
+		Limit      *int   `json:"limit"`
+		Add        *int   `json:"add"`
+		ResetLimit bool   `json:"reset_limit"`
 	}
 	if !decodeJSON(w, r, &in) {
 		return
@@ -852,7 +858,26 @@ func (s *Server) handleAdminFreeOrders(w http.ResponseWriter, r *http.Request) {
 			"Bu foydalanuvchida hujjat raqami yo'q — passport seriyasi yoki INN kiritilmagan.")
 		return
 	}
-	s.store.SetFreeOrdersUsed(key, in.Used)
+	if in.Used != nil {
+		s.store.SetFreeOrdersUsed(key, *in.Used)
+	}
+	switch {
+	case in.ResetLimit:
+		s.store.SetFreeOrdersLimit(key, nil)
+	case in.Limit != nil:
+		if *in.Limit < 0 || *in.Limit > 100000 {
+			writeError(w, http.StatusBadRequest, "bad_request", "Tekin ishlar soni 0 dan 100000 gacha bo'lishi kerak.")
+			return
+		}
+		s.store.SetFreeOrdersLimit(key, in.Limit)
+	case in.Add != nil:
+		next := s.store.FreeOrdersLimitFor(key) + *in.Add
+		if next < 0 || next > 100000 {
+			writeError(w, http.StatusBadRequest, "bad_request", "Tekin ishlar soni 0 dan 100000 gacha bo'lishi kerak.")
+			return
+		}
+		s.store.SetFreeOrdersLimit(key, &next)
+	}
 	u, _ := s.store.UserView(r.PathValue("id"))
 	writeJSON(w, http.StatusOK, u)
 }
