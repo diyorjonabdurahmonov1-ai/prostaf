@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 
 	"prostaff/internal/models"
@@ -285,7 +286,19 @@ func (s *Store) AdminCreateWorker(in AdminWorkerInput) (*models.User, error) {
 	if s.passportTaken(passport, "") {
 		return nil, ErrDuplicatePassport
 	}
-	u, _ := s.GetOrCreateUserByPhone(phone)
+	// A Gmail that already belongs to an account means "make *that* person a
+	// worker". Matching on the phone alone opened a second, separate account
+	// for someone who signs in with Google, so their own profile never showed a
+	// worker panel. Only when no account has the Gmail does the phone decide.
+	var u *models.User
+	if gmail := strings.TrimSpace(in.Gmail); gmail != "" {
+		if gu, ok := s.GetUserByEmail(gmail); ok {
+			u = gu
+		}
+	}
+	if u == nil {
+		u, _ = s.GetOrCreateUserByPhone(phone)
+	}
 	if u == nil {
 		return nil, ErrBadRequest
 	}
