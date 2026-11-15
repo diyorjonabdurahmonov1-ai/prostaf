@@ -378,6 +378,8 @@ type Order struct {
 	RespondedAt *time.Time `json:"responded_at,omitempty"`
 	// ArrivedAt is when the worker said they had reached the customer.
 	ArrivedAt *time.Time `json:"arrived_at,omitempty"`
+	// DepartedAt is when the worker said they had set off for the customer.
+	DepartedAt *time.Time `json:"departed_at,omitempty"`
 	// NoShowAfter is the moment from which the customer may report that the
 	// worker never came and have the job offered to somebody else. Present
 	// only while that can still happen: a worker holds the job and has not

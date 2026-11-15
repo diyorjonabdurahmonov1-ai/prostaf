@@ -199,6 +199,9 @@ func (s *Server) routes() http.Handler {
 	// shared POST /orders/{id}/cancel.
 	mux.HandleFunc("POST "+p+"/worker/orders/{id}/complete", s.authed(s.handleWorkerComplete))
 	mux.HandleFunc("POST "+p+"/worker/orders/{id}/arrived", s.authed(s.handleWorkerArrived))
+	mux.HandleFunc("POST "+p+"/worker/orders/{id}/depart", s.authed(s.handleWorkerDepart))
+	mux.HandleFunc("POST "+p+"/worker/orders/{id}/position", s.authed(s.handleWorkerPosition))
+	mux.HandleFunc("GET "+p+"/orders/{id}/tracking", s.authed(s.handleOrderTracking))
 
 	// Company. Becoming a company is an admin action (POST /admin/companies).
 	mux.HandleFunc("PATCH "+p+"/company/profile", s.authed(s.handlePatchCompanyProfile))
