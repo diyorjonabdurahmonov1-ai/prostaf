@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"prostaff/internal/fcm"
@@ -56,7 +57,18 @@ func (s *Server) notify(userID, kind, title, body string, data map[string]any) *
 		return nil
 	}
 	payload, _ := n.Data.(map[string]any)
-	s.ring(userID, title, body, payload, 0)
+	// Everyday messages get their own, gentler channel; only orders ring.
+	channel := s.store.GetPushChannel(userID)
+	if !strings.HasPrefix(kind, "order.") {
+		channel = s.store.GetGeneralChannel(userID)
+	}
+	// The app is told which stored row this push is, so that while it is open
+	// and showing the row itself it does not show it a second time.
+	out := map[string]any{"notification_id": n.ID}
+	for k, v := range payload {
+		out[k] = v
+	}
+	s.ringOn(userID, channel, title, body, out, 0)
 	return n
 }
 
@@ -74,15 +86,20 @@ func (s *Server) notify(userID, kind, title, body string, data map[string]any) *
 // never hold up an HTTP handler, and a failure must never break the flow that
 // caused it.
 func (s *Server) ring(userID, title, body string, data map[string]any, ttl time.Duration) {
+	s.ringOn(userID, s.store.GetPushChannel(userID), title, body, data, ttl)
+}
+
+// ringOn is ring on a named Android channel.
+func (s *Server) ringOn(userID, channel, title, body string, data map[string]any, ttl time.Duration) {
 	if s.fcm != nil {
 		if token := s.store.GetDeviceToken(userID); token != "" {
-			go s.sendFCM(token, s.store.GetPushChannel(userID), title, body, data, ttl)
+			go s.sendFCM(token, channel, title, body, data, ttl)
 			return
 		}
 	}
 	if token := s.store.GetPushToken(userID); token != "" {
 		m := push.Urgent(token, title, body, data, int(ttl.Seconds()))
-		m.ChannelID = s.store.GetPushChannel(userID)
+		m.ChannelID = channel
 		push.Send(m)
 	}
 }
