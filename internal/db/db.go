@@ -576,9 +576,10 @@ func migrate(db *sql.DB) {
 
 		// Which phone currently holds an account (one account, one phone).
 		`CREATE TABLE IF NOT EXISTS device_locks (
-			user_id   TEXT PRIMARY KEY,
+			user_id   TEXT NOT NULL,
 			device_id TEXT NOT NULL,
-			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW()
+			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (user_id, device_id)
 		)`,
 
 		// The worker setting off for the customer, and where they last reported

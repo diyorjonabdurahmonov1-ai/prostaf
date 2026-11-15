@@ -264,8 +264,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	// One account, one phone: refused while it is open on another one.
 	if !u.HasRole(models.RoleAdmin) && !s.store.ClaimDevice(u.ID, deviceID(r), false) {
-		writeError(w, http.StatusConflict, "device_busy",
-			"Bu akkaunt boshqa telefonda ochiq. Avval o'sha telefonda chiqing yoki ilovani yopib, bir necha daqiqadan keyin urinib ko'ring. Telefon yo'qolgan bo'lsa, «Parolni unutdim» orqali SMS kod bilan kiring.")
+		msg := "Bu akkaunt boshqa telefonda ochiq. Avval o'sha telefonda chiqing yoki ilovani yopib, bir necha daqiqadan keyin urinib ko'ring. Telefon yo'qolgan bo'lsa, «Parolni unutdim» orqali SMS kod bilan kiring."
+		if n := s.store.DeviceLimit(u.ID); n > 1 {
+			msg = fmt.Sprintf("Bu akkauntda allaqachon %d ta telefon ochiq (eng ko'pi shuncha). Bittasida chiqing yoki bir necha daqiqa kuting. Telefon yo'qolgan bo'lsa, «Parolni unutdim» orqali SMS kod bilan kiring.", n)
+		}
+		writeError(w, http.StatusConflict, "device_busy", msg)
 		return
 	}
 	s.issueSession(w, u.ID)
@@ -510,9 +513,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if token := strings.TrimSpace(body.RefreshToken); token != "" {
-		// Signing out frees the account for any other phone at once.
+		// Signing out frees this phone's place on the account at once — and when
+		// no other phone is still using it (a firm may have several), a worker or
+		// firm goes offline and stops being rung: pressing "exit" must mean it.
 		if uid, ok := s.store.ValidateRefreshToken(token); ok {
 			s.store.ReleaseDevice(uid, deviceID(r))
+			if !s.store.HasActiveDevice(uid) {
+				s.store.SignedOut(uid)
+			}
 		}
 		s.store.RevokeRefreshToken(token)
 	}
