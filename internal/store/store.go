@@ -393,7 +393,16 @@ func (s *Store) SetDeviceToken(userID, token string) error {
 // on. Anything else is ignored: the value ends up in a message to Firebase, and
 // a channel that does not exist on the phone files the notification under
 // "Miscellaneous", silent — which looks exactly like not being delivered.
-var pushChannels = map[string]bool{"orders": true, "orders_v2": true}
+//
+// "orders_v3" is not a channel: it is how a build says it has the order channel
+// (orders_v2) *and* the general one (general_v1). Naming general_v1 for a phone
+// that does not have it would file the message under "Miscellaneous", silent,
+// so it is only used for phones that said so.
+var pushChannels = map[string]bool{"orders": true, "orders_v2": true, "orders_v3": true}
+
+// generalChannel is where everyday messages (a role change, an admin note, a
+// subscription) are rung: a soft chime, not the order ring.
+const generalChannel = "general_v1"
 
 // SetPushChannel records which order channel this user's phone has.
 func (s *Store) SetPushChannel(userID, channel string) {
@@ -411,7 +420,23 @@ func (s *Store) GetPushChannel(userID string) string {
 	if !pushChannels[channel] {
 		return "orders"
 	}
+	// orders_v3 is the handshake above; the order channel it carries is v2.
+	if channel == "orders_v3" {
+		return "orders_v2"
+	}
 	return channel
+}
+
+// GetGeneralChannel is the channel for messages that are not an order: the
+// chime channel on a phone that has it, otherwise whatever it rings orders on
+// (the behaviour before the chime existed).
+func (s *Store) GetGeneralChannel(userID string) string {
+	var channel string
+	s.db.QueryRow("SELECT push_channel FROM users WHERE id=$1", userID).Scan(&channel)
+	if channel == "orders_v3" {
+		return generalChannel
+	}
+	return s.GetPushChannel(userID)
 }
 
 // GetDeviceToken returns the user's FCM registration token, or "".
