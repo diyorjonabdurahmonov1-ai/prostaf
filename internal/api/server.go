@@ -167,6 +167,8 @@ func (s *Server) routes() http.Handler {
 	// The page the stores ask for: how a person deletes their account, what goes
 	// and what is kept. Public, and outside /api so it is an ordinary web page.
 	mux.HandleFunc("GET /delete-account", s.handleDeleteAccountPage)
+	// The privacy policy the offer refers to and both stores require an address for.
+	mux.HandleFunc("GET /privacy", s.handlePrivacyPage)
 	mux.HandleFunc("POST "+p+"/me/avatar", s.authed(s.handleSetAvatar))
 	// Sends a real Expo push to the caller's own device and reports the ticket,
 	// so "push is broken" can be diagnosed from the phone in one tap.
