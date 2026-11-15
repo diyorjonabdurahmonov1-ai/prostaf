@@ -571,6 +571,13 @@ func migrate(db *sql.DB) {
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_forfeited BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS arrived_at TIMESTAMPTZ`,
 
+		// The worker setting off for the customer, and where they last reported
+		// being on the way — what the customer's live map is drawn from.
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS departed_at TIMESTAMPTZ`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS trail_lat DOUBLE PRECISION`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS trail_lng DOUBLE PRECISION`,
+		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS trail_at TIMESTAMPTZ`,
+
 		// A customer's report that the worker who took the job never came.
 		`CREATE TABLE IF NOT EXISTS worker_no_shows (
 			id             TEXT PRIMARY KEY,

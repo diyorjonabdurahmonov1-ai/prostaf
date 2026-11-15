@@ -96,7 +96,7 @@ func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.Work
 	}
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL,
-		        commission_amount=$4, responded_at=NOW(), arrived_at=NULL, free_trial_used=FALSE
+		        commission_amount=$4, responded_at=NOW(), arrived_at=NULL, departed_at=NULL, trail_at=NULL, free_trial_used=FALSE
 		 WHERE id=$5 AND worker_id='' AND status IN ('pending','matching','invited')`,
 		models.StatusAccepted, wp.UserID, wp.Phone, commission, orderID)
 	if err != nil {

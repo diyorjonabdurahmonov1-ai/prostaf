@@ -128,12 +128,12 @@ func (s *Store) HasHiredCompany(customerID, companyID string) bool {
 func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Order, error) {
 	var o models.Order
 	var invitedIDs, rejectedIDs, images, targetIDs string
-	var inviteExpires, responded, arrived sql.NullTime
+	var inviteExpires, responded, arrived, departed sql.NullTime
 	err := row.Scan(&o.ID, &o.CustomerID, &o.WorkerID, &o.CompanyID, &o.CategoryID,
 		&o.Gender, &o.Description, &o.ImageURL, &o.CustomerPhone, &o.WorkerPhone,
 		&o.Lat, &o.Lng, &o.Status, &invitedIDs, &inviteExpires, &o.CommissionAmount,
 		&o.CreatedAt, &o.CustomerName, &o.Price, &rejectedIDs, &images, &targetIDs,
-		&o.BatchID, &o.BatchSize, &o.CancelledBy, &o.CancelReason, &responded, &arrived)
+		&o.BatchID, &o.BatchSize, &o.CancelledBy, &o.CancelReason, &responded, &arrived, &departed)
 	if err != nil {
 		return nil, err
 	}
@@ -142,6 +142,9 @@ func (s *Store) scanOrder(row interface{ Scan(dest ...any) error }) (*models.Ord
 	}
 	if arrived.Valid {
 		o.ArrivedAt = &arrived.Time
+	}
+	if departed.Valid {
+		o.DepartedAt = &departed.Time
 	}
 	s.setNoShowAfter(&o)
 	// A row from before the column existed, or a lone order: one of one.
@@ -167,7 +170,7 @@ const orderCols = "id, customer_id, worker_id, company_id, category_id, gender, 
 
 // orderReadCols is what scanOrder reads: the columns an order is written with,
 // plus the ones only ever set later in its life.
-const orderReadCols = orderCols + ", cancelled_by, cancel_reason, responded_at, arrived_at"
+const orderReadCols = orderCols + ", cancelled_by, cancel_reason, responded_at, arrived_at, departed_at"
 
 // CreateOrder creates a pending order for a customer.
 func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, error) {
@@ -848,7 +851,7 @@ func (s *Store) reopen(o *models.Order) (*models.Order, error) {
 		res, err := s.db.Exec(
 			`UPDATE orders SET status=$1, invited_worker_ids='[]', rejected_worker_ids=$2, invite_expires_at=$3,
 			        worker_id='', worker_phone='', cancelled_by='', cancel_reason='', responded_at=NULL, closed_at=NULL,
-			        arrived_at=NULL, commission_forfeited=commission_forfeited+commission_amount, commission_amount=0,
+			        arrived_at=NULL, departed_at=NULL, trail_at=NULL, commission_forfeited=commission_forfeited+commission_amount, commission_amount=0,
 			        free_trial_used=FALSE
 			 WHERE id=$4 AND status='cancelled' AND worker_id=$5`,
 			models.StatusMatching, marshalJSON(dropped), expires, o.ID, o.WorkerID)
@@ -947,7 +950,7 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	// above — two workers reaching this line together both pass every check.
 	res, err := s.db.Exec(
 		`UPDATE orders SET status=$1, worker_id=$2, worker_phone=$3, invite_expires_at=NULL, commission_amount=$4,
-		        responded_at=NOW(), arrived_at=NULL, free_trial_used=FALSE
+		        responded_at=NOW(), arrived_at=NULL, departed_at=NULL, trail_at=NULL, free_trial_used=FALSE
 		 WHERE id=$5 AND worker_id='' AND status IN ('matching','invited')`,
 		models.StatusAccepted, workerUserID, wp.Phone, commission, orderID)
 	if err != nil {
