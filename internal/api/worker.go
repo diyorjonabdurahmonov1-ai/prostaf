@@ -9,7 +9,10 @@ import (
 	"prostaff/internal/store"
 )
 
-// GET /workers/nearby?lat=&lng=&radius_km= — online workers around a point.
+// GET /workers/nearby?lat=&lng=&radius_km=&category_id=&gender= — online
+// workers around a point. With a category only those who offer it are listed,
+// and with a gender (male / female) only workers of that gender: the customer
+// says what kind of help they need first, and sees who can give it.
 func (s *Server) handleNearbyWorkers(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	lat, _ := strconv.ParseFloat(q.Get("lat"), 64)
@@ -17,8 +20,16 @@ func (s *Server) handleNearbyWorkers(w http.ResponseWriter, r *http.Request) {
 	radius, _ := strconv.ParseFloat(q.Get("radius_km"), 64)
 	u := userFrom(r)
 	found := s.store.NearbyWorkers(lat, lng, radius, u.ID)
+	category := q.Get("category_id")
+	gender := q.Get("gender")
 	out := make([]models.WorkerProfile, 0, len(found))
 	for _, wp := range found {
+		if category != "" && !contains(wp.CategoryIDs, category) {
+			continue
+		}
+		if (gender == "male" || gender == "female") && wp.Gender != gender {
+			continue
+		}
 		out = append(out, s.publicWorker(u, wp))
 	}
 	writeJSON(w, http.StatusOK, out)

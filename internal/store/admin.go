@@ -278,6 +278,11 @@ func (s *Store) AdminCreateWorker(in AdminWorkerInput) (*models.User, error) {
 	// The paperwork is judged before the account is opened. GetOrCreateUserByPhone
 	// below *creates* a customer, so a form rejected further down would leave a
 	// bare account behind for a worker who was never registered.
+	// A worker the office opens must have at least one service, or no order will
+	// ever be offered to them.
+	if len(in.CategoryIDs) == 0 {
+		return nil, ErrNoCategories
+	}
 	passport := NormalizePassport(in.PassportSeries)
 	if !ValidPassport(passport) {
 		return nil, ErrInvalidPassport

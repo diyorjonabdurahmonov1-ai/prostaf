@@ -179,6 +179,10 @@ func (s *Store) UpdateWorkerProfile(userID string, p WorkerPatch) (*models.Worke
 		wp.PriceMax = *p.PriceMax
 	}
 	if p.CategoryIDs != nil {
+		// A worker keeps at least one service: with none they can be sent nothing.
+		if len(*p.CategoryIDs) == 0 {
+			return nil, ErrNoCategories
+		}
 		for _, c := range *p.CategoryIDs {
 			if !s.categoryExists(c) {
 				return nil, ErrBadRequest
@@ -223,6 +227,10 @@ func (s *Store) SetWorkerStatus(userID string, online bool, lat, lng *float64) (
 	wp, ok := s.GetWorkerByUser(userID)
 	if !ok {
 		return nil, ErrNotFound
+	}
+	// Going online needs at least one service chosen. Going offline never does.
+	if online && len(wp.CategoryIDs) == 0 {
+		return nil, ErrNoCategories
 	}
 	wp.Online = online
 	if lat != nil {
