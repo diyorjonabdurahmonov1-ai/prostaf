@@ -48,7 +48,7 @@ func (s *Store) scanWorker(row interface{ Scan(dest ...any) error }) (*models.Wo
 	wp.Images = unmarshalStrings(images)
 	// The limit is a setting, not a column: raise it and every worker's remaining
 	// trial jobs go up with it, including the ones already signed up.
-	wp.FreeOrdersLimit = s.FreeOrderLimit()
+	wp.FreeOrdersLimit = s.freeLimitFor(WorkerTrialKey(wp.PassportSeries))
 	return &wp, nil
 }
 
@@ -127,7 +127,7 @@ func (s *Store) CreateWorkerProfile(userID string, in WorkerInput) (*models.Work
 		Images:          in.Images,
 		PassportSeries:  passport,
 		FreeOrdersUsed:  s.freeOrdersUsed(WorkerTrialKey(passport)),
-		FreeOrdersLimit: s.FreeOrderLimit(),
+		FreeOrdersLimit: s.freeLimitFor(WorkerTrialKey(passport)),
 		CreatedAt:       time.Now(),
 	}
 	if wp.Images == nil {
@@ -400,7 +400,7 @@ func (s *Store) scanCompany(row interface{ Scan(dest ...any) error }) (*models.C
 	}
 	cp.Images = unmarshalStrings(images)
 	cp.CategoryIDs = unmarshalStrings(categoryIDs)
-	cp.FreeOrdersLimit = s.FreeOrderLimit()
+	cp.FreeOrdersLimit = s.freeLimitFor(CompanyTrialKey(cp.INN))
 	if until.Valid {
 		end := until.Time
 		cp.SubscriptionUntil = &end
@@ -471,7 +471,7 @@ func (s *Store) CreateCompanyProfile(userID string, in CompanyInput) (*models.Co
 		Website:         in.Website,
 		INN:             inn,
 		FreeOrdersUsed:  s.freeOrdersUsed(CompanyTrialKey(inn)),
-		FreeOrdersLimit: s.FreeOrderLimit(),
+		FreeOrdersLimit: s.freeLimitFor(CompanyTrialKey(inn)),
 		CreatedAt:       time.Now(),
 	}
 	if cp.Images == nil {

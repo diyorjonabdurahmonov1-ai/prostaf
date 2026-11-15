@@ -347,6 +347,9 @@ func migrate(db *sql.DB) {
 			used       INTEGER NOT NULL DEFAULT 0,
 			created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 		)`,
+		// The office can give one provider more (or fewer) free jobs than the
+		// platform setting. NULL means "whatever the platform setting is".
+		`ALTER TABLE free_trials ADD COLUMN IF NOT EXISTS limit_override INTEGER`,
 
 		// A firm's account is not a wallet that commission is taken from — it is a
 		// subscription with an end date. `subscription_until` is that date; NULL
