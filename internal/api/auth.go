@@ -224,6 +224,11 @@ func (s *Server) handleOTPVerify(w http.ResponseWriter, r *http.Request) {
 		s.store.SetPasswordHash(u.ID, hash)
 	}
 
+	// Proving the phone with a code is allowed to take the account over from
+	// another phone — it is how somebody whose old phone is lost gets back in.
+	if !u.HasRole(models.RoleAdmin) {
+		s.store.ClaimDevice(u.ID, deviceID(r), true)
+	}
 	s.issueSession(w, u.ID)
 }
 
@@ -255,6 +260,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	loginAttempts.pass(phone)
 	if !u.Active {
 		writeError(w, http.StatusForbidden, "forbidden", "this account is blocked")
+		return
+	}
+	// One account, one phone: refused while it is open on another one.
+	if !u.HasRole(models.RoleAdmin) && !s.store.ClaimDevice(u.ID, deviceID(r), false) {
+		msg := "Bu akkaunt boshqa telefonda ochiq. Avval o'sha telefonda chiqing yoki ilovani yopib, bir necha daqiqadan keyin urinib ko'ring. Telefon yo'qolgan bo'lsa, «Parolni unutdim» orqali SMS kod bilan kiring."
+		if n := s.store.DeviceLimit(u.ID); n > 1 {
+			msg = fmt.Sprintf("Bu akkauntda allaqachon %d ta telefon ochiq (eng ko'pi shuncha). Bittasida chiqing yoki bir necha daqiqa kuting. Telefon yo'qolgan bo'lsa, «Parolni unutdim» orqali SMS kod bilan kiring.", n)
+		}
+		writeError(w, http.StatusConflict, "device_busy", msg)
 		return
 	}
 	s.issueSession(w, u.ID)
@@ -435,8 +449,10 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.store.SetPasswordHash(u.ID, hash)
-	// Every session that predates the reset was built on the old password.
+	// Every session that predates the reset was built on the old password, and
+	// the SMS code that got here vouches for the person: any phone may now sign in.
 	s.store.RevokeAllRefreshTokens(u.ID)
+	s.store.ReleaseAllDevices(u.ID)
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -466,6 +482,14 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A phone that has been replaced cannot quietly keep its session alive.
+	if device := deviceID(r); device != "" && !u.HasRole(models.RoleAdmin) && !s.store.TouchDevice(userID, device) {
+		s.store.RevokeRefreshToken(token)
+		writeError(w, http.StatusUnauthorized, "session_replaced",
+			"Bu akkaunt boshqa telefonda ochildi. Qayta kiring.")
+		return
+	}
+
 	access, refresh, err := s.newSession(userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal", "could not issue a token")
@@ -489,6 +513,15 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if token := strings.TrimSpace(body.RefreshToken); token != "" {
+		// Signing out frees this phone's place on the account at once — and when
+		// no other phone is still using it (a firm may have several), a worker or
+		// firm goes offline and stops being rung: pressing "exit" must mean it.
+		if uid, ok := s.store.ValidateRefreshToken(token); ok {
+			s.store.ReleaseDevice(uid, deviceID(r))
+			if !s.store.HasActiveDevice(uid) {
+				s.store.SignedOut(uid)
+			}
+		}
 		s.store.RevokeRefreshToken(token)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})

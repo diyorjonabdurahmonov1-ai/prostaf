@@ -574,6 +574,14 @@ func migrate(db *sql.DB) {
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS commission_forfeited BIGINT NOT NULL DEFAULT 0`,
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS arrived_at TIMESTAMPTZ`,
 
+		// Which phone currently holds an account (one account, one phone).
+		`CREATE TABLE IF NOT EXISTS device_locks (
+			user_id   TEXT NOT NULL,
+			device_id TEXT NOT NULL,
+			last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			PRIMARY KEY (user_id, device_id)
+		)`,
+
 		// The worker setting off for the customer, and where they last reported
 		// being on the way — what the customer's live map is drawn from.
 		`ALTER TABLE orders ADD COLUMN IF NOT EXISTS departed_at TIMESTAMPTZ`,
