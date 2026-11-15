@@ -54,6 +54,11 @@ var (
 	ErrDuplicateCategory = errors.New("duplicate_category")
 	ErrCategoryInUse     = errors.New("category_in_use")
 
+	// ErrNoCategories: a worker with no service chosen cannot be sent any work —
+	// an order names a service, and only workers who offer it are rung — so
+	// going online without one is refused rather than left to sit there silent.
+	ErrNoCategories = errors.New("categories_required")
+
 	// ErrSubscriptionExpired is a firm trying to take a job with no months left
 	// and no free ones. Separate from ErrInsufficientBalance because the fix is
 	// different: a firm does not top up a wallet, it buys another month.
