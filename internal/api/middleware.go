@@ -64,7 +64,7 @@ func corsMW(allowedOrigins []string) func(http.Handler) http.Handler {
 				h.Set("Access-Control-Allow-Origin", origin)
 			}
 			h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Id")
 			h.Set("Access-Control-Max-Age", "86400")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -91,6 +91,15 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 		u, ok := s.store.GetUser(sub)
 		if !ok || !u.Active {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "unknown or inactive user")
+			return
+		}
+		// One account, one phone. The app names its install in X-Device-Id; if a
+		// different phone has since taken the account over, this one is told so
+		// and signs itself out. Builds that send no id, and the office's admin
+		// accounts, are not held to it.
+		if device := deviceID(r); device != "" && !u.HasRole(models.RoleAdmin) && !s.store.TouchDevice(u.ID, device) {
+			writeError(w, http.StatusUnauthorized, "session_replaced",
+				"Bu akkaunt boshqa telefonda ochildi. Qayta kiring.")
 			return
 		}
 		// Rate limited here rather than at the front door, because here is where
@@ -123,6 +132,15 @@ func (s *Server) requireRole(role string, next http.HandlerFunc) http.HandlerFun
 // admin composes auth + admin-role enforcement.
 func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
 	return s.authed(s.requireRole(models.RoleAdmin, next))
+}
+
+// deviceID is the install id the app sends, or "" for a build that sends none.
+func deviceID(r *http.Request) string {
+	d := strings.TrimSpace(r.Header.Get("X-Device-Id"))
+	if len(d) > 100 {
+		return ""
+	}
+	return d
 }
 
 func bearerToken(r *http.Request) string {

@@ -152,6 +152,9 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST "+p+"/auth/otp/verify", s.handleOTPVerify)
 	mux.HandleFunc("POST "+p+"/auth/admin/login", s.handleAdminLogin)
 	mux.HandleFunc("POST "+p+"/auth/refresh", s.handleRefresh)
+	// The app calls this about once a minute while it is open: being heard from
+	// is what keeps this phone holding its account. authed does the recording.
+	mux.HandleFunc("POST "+p+"/me/ping", s.authed(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	mux.HandleFunc("POST "+p+"/auth/logout", s.handleLogout)
 
 	// Realtime. The WebSocket is the primary transport — React Native has no
