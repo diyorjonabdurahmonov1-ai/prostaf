@@ -15,6 +15,7 @@ type Config struct {
 	JWTSecret         string
 	DevMode           bool
 	CommissionPercent int
+	CommissionFixed   int64
 	MinBalance        int64
 
 	// FreeOrderLimit is how many jobs a brand-new provider may accept before the
@@ -205,6 +206,7 @@ func Load() Config {
 		JWTSecret:         env("JWT_SECRET", "prostaff-dev-secret-change-me"),
 		DevMode:           envBool("DEV_MODE", true),
 		CommissionPercent: envInt("COMMISSION_PERCENT", 10),
+		CommissionFixed:   int64(envInt("COMMISSION_FIXED", 10000)),
 		MinBalance:        int64(envInt("MIN_BALANCE", 10000)),
 
 		FreeOrderLimit:         envInt("FREE_ORDER_LIMIT", 3),

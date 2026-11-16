@@ -126,6 +126,7 @@ func New(cfg config.Config, db *sql.DB, blobs *blob.Store) *Store {
 		blobs: blobs,
 		settings: models.Settings{
 			CommissionPercent:      cfg.CommissionPercent,
+			CommissionFixed:        cfg.CommissionFixed,
 			MinBalance:             cfg.MinBalance,
 			FreeOrderLimit:         cfg.FreeOrderLimit,
 			CompanyMonthlyPrice:    cfg.CompanyMonthlyPrice,
@@ -234,6 +235,7 @@ func (s *Store) loadSettings() {
 		}
 	}
 	loadInt("commission_percent", &s.settings.CommissionPercent)
+	loadInt64("commission_fixed", &s.settings.CommissionFixed)
 	loadInt64("min_balance", &s.settings.MinBalance)
 	loadInt("free_order_limit", &s.settings.FreeOrderLimit)
 	loadInt64("company_monthly_price", &s.settings.CompanyMonthlyPrice)
@@ -635,6 +637,10 @@ func (s *Store) UpdateSettings(p SettingsPatch) models.Settings {
 	if p.CommissionPercent != nil {
 		s.settings.CommissionPercent = *p.CommissionPercent
 		save("commission_percent", *p.CommissionPercent)
+	}
+	if p.CommissionFixed != nil && *p.CommissionFixed >= 0 && *p.CommissionFixed <= 10_000_000 {
+		s.settings.CommissionFixed = *p.CommissionFixed
+		save("commission_fixed", *p.CommissionFixed)
 	}
 	// Wallets carry their own copy of the threshold, so the setting alone would
 	// only reach accounts created after the change. Sweep the existing rows too:

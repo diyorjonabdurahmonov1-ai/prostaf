@@ -710,6 +710,7 @@ func (s *Server) handleAdminGetSettings(w http.ResponseWriter, _ *http.Request) 
 func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		CommissionPercent *int   `json:"commission_percent"`
+		CommissionFixed   *int64 `json:"commission_fixed"`
 		MinBalance        *int64 `json:"min_balance"`
 		// How many jobs a new provider gets free, what a firm's month costs, the
 		// standing discount on it, and how much notice a firm gets before its
@@ -734,6 +735,7 @@ func (s *Server) handleAdminSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := s.store.UpdateSettings(store.SettingsPatch{
 		CommissionPercent:      in.CommissionPercent,
+		CommissionFixed:        in.CommissionFixed,
 		MinBalance:             in.MinBalance,
 		FreeOrderLimit:         in.FreeOrderLimit,
 		CompanyMonthlyPrice:    in.CompanyMonthlyPrice,

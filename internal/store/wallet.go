@@ -35,6 +35,15 @@ func (s *Store) TopupDev(userID string, amount int64) (*models.Payment, *models.
 	return p, s.CreditWallet(userID, amount), nil
 }
 
+// commissionFor is what a job costs the worker: the flat fee when one is set,
+// otherwise the percentage of the job's price.
+func (s *Store) commissionFor(price int64) int64 {
+	if s.settings.CommissionFixed > 0 {
+		return s.settings.CommissionFixed
+	}
+	return price * int64(s.settings.CommissionPercent) / 100
+}
+
 // CommissionPercent exposes the current commission percentage.
 func (s *Store) CommissionPercent() int {
 	return s.settings.CommissionPercent
