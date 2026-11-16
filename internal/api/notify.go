@@ -10,6 +10,7 @@ import (
 	"prostaff/internal/models"
 	"prostaff/internal/push"
 	"prostaff/internal/sse"
+	"prostaff/internal/store"
 )
 
 // The one place a user is told that something happened to them.
@@ -68,7 +69,7 @@ func (s *Server) notify(userID, kind, title, body string, data map[string]any) *
 	for k, v := range payload {
 		out[k] = v
 	}
-	s.ringOn(userID, channel, title, body, out, 0)
+	s.ringOn(userID, channel, title, body, out, pushTTL(kind))
 	return n
 }
 
@@ -123,4 +124,22 @@ func (s *Server) sendFCM(token, channel, title, body string, data map[string]any
 	default:
 		log.Printf("push: %v", err)
 	}
+}
+
+// pushTTL is how long a push stays worth delivering to a phone that is off or
+// out of coverage. With no TTL the push service holds it for weeks, and a phone
+// that comes back reads a day-old "Ishchi yo'lga chiqdim" or "Yangi buyurtma!"
+// as if it had just happened. Orders are minutes-long events; messages and
+// money are still true later, so those keep the long default (0).
+func pushTTL(kind string) time.Duration {
+	switch kind {
+	case "order.new", "order.invite":
+		return store.InviteTTL
+	case "order.departed", "order.arrived", "order.accepted", "order.assigned", "order.batch_ready":
+		return 30 * time.Minute
+	}
+	if strings.HasPrefix(kind, "order.") {
+		return 6 * time.Hour
+	}
+	return 0
 }
