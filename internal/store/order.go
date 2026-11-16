@@ -964,7 +964,7 @@ func (s *Store) Accept(orderID, workerUserID string) (*models.Order, *models.Wor
 	if base <= 0 {
 		base = wp.PriceMin
 	}
-	commission := base * int64(s.settings.CommissionPercent) / 100
+	commission := s.commissionFor(base)
 
 	// The winner is decided by the database, not by the order of the checks
 	// above — two workers reaching this line together both pass every check.

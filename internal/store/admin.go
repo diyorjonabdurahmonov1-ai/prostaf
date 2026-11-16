@@ -772,7 +772,8 @@ type Finance struct {
 		Subscriptions int64 `json:"subscriptions"`
 		Commission    int64 `json:"commission"`
 	} `json:"totals"`
-	CommissionPercent int `json:"commission_percent"`
+	CommissionPercent int   `json:"commission_percent"`
+	CommissionFixed   int64 `json:"commission_fixed"`
 }
 
 func (s *Store) FinanceOverview() Finance {
@@ -796,11 +797,13 @@ func (s *Store) FinanceOverview() Finance {
 	// Sum commission from orders.
 	s.db.QueryRow("SELECT COALESCE(SUM(commission_amount + commission_forfeited),0) FROM orders").Scan(&f.Totals.Commission)
 	f.CommissionPercent = s.settings.CommissionPercent
+	f.CommissionFixed = s.settings.CommissionFixed
 	return f
 }
 
 type SettingsPatch struct {
 	CommissionPercent *int
+	CommissionFixed   *int64
 	MinBalance        *int64
 
 	FreeOrderLimit         *int

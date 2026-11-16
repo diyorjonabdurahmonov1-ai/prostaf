@@ -54,3 +54,19 @@ func TestMatchesOrderRespectsWorkerMinimum(t *testing.T) {
 		t.Fatal("order at the minimum must match")
 	}
 }
+
+func TestCommissionForFlatFeeOrPercent(t *testing.T) {
+	s := &Store{}
+	s.settings.CommissionPercent = 10
+	s.settings.CommissionFixed = 10000
+	if got := s.commissionFor(150000); got != 10000 {
+		t.Fatalf("flat fee: got %d", got)
+	}
+	if got := s.commissionFor(50000); got != 10000 {
+		t.Fatalf("flat fee does not depend on price: got %d", got)
+	}
+	s.settings.CommissionFixed = 0
+	if got := s.commissionFor(150000); got != 15000 {
+		t.Fatalf("percent fallback: got %d", got)
+	}
+}

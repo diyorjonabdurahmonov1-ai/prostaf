@@ -529,6 +529,9 @@ type Notification struct {
 // Settings holds admin-tunable platform values.
 type Settings struct {
 	CommissionPercent int   `json:"commission_percent"`
+	// CommissionFixed is the flat fee taken from a worker for every job, in so'm.
+	// When above zero it replaces the percentage.
+	CommissionFixed int64 `json:"commission_fixed"`
 	MinBalance        int64 `json:"min_balance"`
 	// FreeOrderLimit is how many jobs a new worker or firm may accept before the
 	// money rules apply.

@@ -84,7 +84,7 @@ func (s *Store) AdminAssign(orderID, worker string) (*models.Order, *models.Work
 	if base <= 0 {
 		base = wp.PriceMin
 	}
-	commission := base * int64(s.settings.CommissionPercent) / 100
+	commission := s.commissionFor(base)
 	// Whatever left the order without a worker — expired, declined, dropped —
 	// reopen clears it; an order still searching is taken as it stands.
 	switch o.Status {
