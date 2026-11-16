@@ -179,6 +179,15 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 	if in.CategoryID == "" || !s.categoryBookable(in.CategoryID) {
 		return nil, ErrBadRequest
 	}
+	if err := validateOrderInput(in); err != nil {
+		return nil, err
+	}
+	if s.openOrderCount(customerID) >= maxOpenOrders {
+		return nil, ErrTooManyOrders
+	}
+	if s.batchBelongsToOther(in.BatchID, customerID) {
+		return nil, ErrForbidden
+	}
 	if in.Gender == "" {
 		in.Gender = "any"
 	}
@@ -1260,9 +1269,15 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 	if stars < 1 || stars > 5 {
 		return nil, ErrBadRequest
 	}
+	comment = cleanRatingComment(comment)
 	o, ok := s.GetOrder(orderID)
 	if !ok {
 		return nil, ErrNotFound
+	}
+	// Only a finished job is rated. Before, any order could be — so a cancelled
+	// one, or one still being searched, could collect stars.
+	if o.Status != models.StatusCompleted {
+		return nil, ErrConflict
 	}
 	// A company order has no worker on it — the firm's own account is the other
 	// side of the job, so it is rated and it rates back exactly like a worker.
@@ -1304,8 +1319,13 @@ func (s *Store) Rate(orderID, fromUserID string, stars int, comment string) (*mo
 		Comment:    comment,
 		CreatedAt:  time.Now(),
 	}
-	s.db.Exec("INSERT INTO ratings (id, order_id, from_user_id, to_user_id, target_role, stars, comment, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
-		r.ID, r.OrderID, r.FromUserID, r.ToUserID, r.TargetRole, r.Stars, r.Comment, r.CreatedAt)
+	// One rating per person per order, checked and written under one lock. The
+	// endpoint took any number: a customer with one job could send a thousand
+	// one-star ratings and flatten a worker's score — or a thousand five-star
+	// ones and inflate their own favourite's.
+	if err := s.insertRatingOnce(r); err != nil {
+		return nil, err
+	}
 
 	// Exactly one aggregate moves, the one for the hat that was worn.
 	//

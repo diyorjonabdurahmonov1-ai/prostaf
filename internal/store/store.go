@@ -59,6 +59,11 @@ var (
 	// going online without one is refused rather than left to sit there silent.
 	ErrNoCategories = errors.New("categories_required")
 
+	// ErrTooManyOrders: one customer already has the most unfinished orders allowed.
+	ErrTooManyOrders = errors.New("too_many_orders")
+	// ErrAlreadyRated: this person has already rated this order.
+	ErrAlreadyRated = errors.New("already_rated")
+
 	// ErrSubscriptionExpired is a firm trying to take a job with no months left
 	// and no free ones. Separate from ErrInsufficientBalance because the fix is
 	// different: a firm does not top up a wallet, it buys another month.

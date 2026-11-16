@@ -66,6 +66,11 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrDuplicateCategory):
 		writeError(w, http.StatusConflict, "duplicate_category",
 			"Bunday kategoriya allaqachon bor.")
+	case errors.Is(err, store.ErrTooManyOrders):
+		writeError(w, http.StatusTooManyRequests, "too_many_orders",
+			"Sizda juda ko'p ochiq buyurtma bor. Avval ba'zilarini yakunlang yoki bekor qiling.")
+	case errors.Is(err, store.ErrAlreadyRated):
+		writeError(w, http.StatusConflict, "already_rated", "Siz bu buyurtmani allaqachon baholagansiz.")
 	case errors.Is(err, store.ErrNoCategories):
 		writeError(w, http.StatusConflict, "categories_required",
 			"Kamida bitta kategoriya tanlang — shundagina buyurtmalar kela boshlaydi.")
