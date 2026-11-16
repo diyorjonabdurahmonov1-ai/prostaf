@@ -104,3 +104,19 @@ func (s *Store) insertRatingOnce(r *models.Rating) error {
 	}
 	return nil
 }
+
+// highestMinPrice is the largest minimum price, among the given worker
+// profiles, that sits above price — 0 when every one of them accepts it.
+func (s *Store) highestMinPrice(workerIDs []string, price int64) int64 {
+	var top int64
+	for _, id := range workerIDs {
+		var min int64
+		if s.db.QueryRow("SELECT price_min FROM workers WHERE id=$1", id).Scan(&min) != nil {
+			continue
+		}
+		if min > price && min > top {
+			top = min
+		}
+	}
+	return top
+}
