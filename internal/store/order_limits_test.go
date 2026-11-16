@@ -4,6 +4,8 @@ import (
 	"math"
 	"strings"
 	"testing"
+
+	"prostaff/internal/models"
 )
 
 func TestValidateOrderInput(t *testing.T) {
@@ -38,5 +40,17 @@ func TestCleanRatingComment(t *testing.T) {
 	long := strings.Repeat("я", maxRatingComment+50)
 	if n := len([]rune(cleanRatingComment(long))); n != maxRatingComment {
 		t.Errorf("kept %d characters", n)
+	}
+}
+
+func TestMatchesOrderRespectsWorkerMinimum(t *testing.T) {
+	wp := &models.WorkerProfile{ID: "w", UserID: "u", PriceMin: 150000, CategoryIDs: []string{"c"}, Lat: 41, Lng: 69}
+	o := &models.Order{CustomerID: "x", CategoryID: "c", Gender: "any", Lat: 41, Lng: 69, Price: 149000}
+	if matchesOrderWithin(o, wp, 50) {
+		t.Fatal("order below the minimum must not match")
+	}
+	o.Price = 150000
+	if !matchesOrderWithin(o, wp, 50) {
+		t.Fatal("order at the minimum must match")
 	}
 }

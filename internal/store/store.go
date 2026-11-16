@@ -833,3 +833,9 @@ func validStoreURL(u string) bool {
 	u = strings.TrimSpace(u)
 	return u == "" || (strings.HasPrefix(u, "https://") && len(u) <= 300 && !strings.ContainsAny(u, " \n\t\"<>"))
 }
+
+// PriceBelowMinError is an order priced under the minimum of a worker the
+// customer chose. Min is the highest such minimum, so one raise is enough.
+type PriceBelowMinError struct{ Min int64 }
+
+func (e *PriceBelowMinError) Error() string { return "price_below_min" }

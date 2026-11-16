@@ -217,6 +217,13 @@ func (s *Store) CreateOrder(customerID string, in OrderInput) (*models.Order, er
 	if len(targets) > maxTargetWorkers {
 		targets = targets[:maxTargetWorkers]
 	}
+	// A worker's minimum price is a promise to them: a job offered below it
+	// never rings their phone. When the customer picked the people themselves,
+	// say so up front with the figure, so they can raise the price instead of
+	// waiting on a call that was never going to come.
+	if min := s.highestMinPrice(targets, in.Price); min > 0 {
+		return nil, &PriceBelowMinError{Min: min}
+	}
 
 	// The order starts searching the moment it is created — with no targets it
 	// goes out to every matching worker nearby (see DispatchWave).
@@ -568,6 +575,10 @@ func matchesOrder(o *models.Order, wp *models.WorkerProfile) bool {
 func matchesOrderWithin(o *models.Order, wp *models.WorkerProfile, radiusKm float64) bool {
 	// You cannot be called to your own job.
 	if wp.UserID == o.CustomerID {
+		return false
+	}
+	// Below the worker's own minimum: not offered to them at all.
+	if o.Price > 0 && o.Price < wp.PriceMin {
 		return false
 	}
 	if len(o.TargetWorkerIDs) > 0 {

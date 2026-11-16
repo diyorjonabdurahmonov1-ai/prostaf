@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"prostaff/internal/store"
 )
@@ -32,6 +33,18 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 // state" is indistinguishable, from the other side of the glass, from a button
 // that simply does not work.
 func writeStoreError(w http.ResponseWriter, err error) {
+	var below *store.PriceBelowMinError
+	if errors.As(err, &below) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{
+			"error": map[string]any{
+				"code": "price_below_min",
+				"message": "Bu ishchi eng kamida " + formatSom(below.Min) +
+					" so'mga ishlaydi. Xohlasangiz narxni ko'taring.",
+				"min_price": below.Min,
+			},
+		})
+		return
+	}
 	switch {
 	case errors.Is(err, store.ErrCompanyBusy):
 		writeError(w, http.StatusConflict, "company_busy",
@@ -153,4 +166,17 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// formatSom writes 150000 as "150 000".
+func formatSom(n int64) string {
+	d := strconv.FormatInt(n, 10)
+	var out []byte
+	for i := range d {
+		if i > 0 && (len(d)-i)%3 == 0 {
+			out = append(out, ' ')
+		}
+		out = append(out, d[i])
+	}
+	return string(out)
 }
