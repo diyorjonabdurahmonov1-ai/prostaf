@@ -64,7 +64,7 @@ func corsMW(allowedOrigins []string) func(http.Handler) http.Handler {
 				h.Set("Access-Control-Allow-Origin", origin)
 			}
 			h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Id")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Id, X-App-Lang")
 			h.Set("Access-Control-Max-Age", "86400")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
