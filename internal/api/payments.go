@@ -487,7 +487,7 @@ func (s *Server) applyPayment(p *models.Payment) {
 		s.notify(p.UserID, "subscription.extended",
 			"To'lov qabul qilindi",
 			fmt.Sprintf("Obunangiz %d oyga uzaytirildi. Amal qilish muddati: %s.", sub.Months, until),
-			map[string]any{"months": sub.Months, "until": until, "amount": p.Amount})
+			map[string]any{"months": sub.Months, "until": until, "amount": p.Amount}, sub.Months, until)
 
 	default:
 		wallet := s.store.CreditWallet(p.UserID, p.Amount)
@@ -498,6 +498,6 @@ func (s *Server) applyPayment(p *models.Payment) {
 		s.notify(p.UserID, "wallet.topup",
 			"Hisobingiz to'ldirildi",
 			fmt.Sprintf("%s so'm hisobingizga qo'shildi.", store.FormatSom(p.Amount)),
-			map[string]any{"amount": p.Amount, "payment_id": p.ID})
+			map[string]any{"amount": p.Amount, "payment_id": p.ID}, store.FormatSom(p.Amount))
 	}
 }

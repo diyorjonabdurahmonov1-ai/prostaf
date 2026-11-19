@@ -604,6 +604,14 @@ func migrate(db *sql.DB) {
 		// phone actually has. Empty means the original "orders".
 		`ALTER TABLE users ADD COLUMN IF NOT EXISTS push_channel TEXT NOT NULL DEFAULT ''`,
 
+		// The language each account's app is set to, so a push or an inbox row is
+		// written in it. Kept apart from users: it is a preference of the phone,
+		// refreshed from the X-App-Lang header, not part of the account.
+		`CREATE TABLE IF NOT EXISTS user_langs (
+			user_id TEXT PRIMARY KEY,
+			lang    TEXT NOT NULL DEFAULT 'uz'
+		)`,
+
 		// Indexes for common queries.
 		`CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_orders_company  ON orders(company_id)`,

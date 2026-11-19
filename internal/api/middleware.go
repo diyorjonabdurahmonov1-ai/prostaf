@@ -112,6 +112,11 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 				"too many requests — please slow down")
 			return
 		}
+		// The language the app is set to, so what the server writes to this
+		// account (pushes, the inbox) comes in it.
+		if lang := r.Header.Get("X-App-Lang"); lang != "" {
+			s.store.SetUserLang(u.ID, lang)
+		}
 		ctx := context.WithValue(r.Context(), userCtxKey, u)
 		next(w, r.WithContext(ctx))
 	}
