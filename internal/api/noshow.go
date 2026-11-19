@@ -29,7 +29,7 @@ func (s *Server) notifyRefund(order *models.Order) {
 	switch {
 	case order.RefundedCommission > 0:
 		s.notify(order.WorkerID, "wallet.refund", "Komissiya qaytarildi",
-			fmt.Sprintf("Buyurtma bekor qilingani uchun %d so'm hamyoningizga qaytarildi.", order.RefundedCommission), data)
+			fmt.Sprintf("Buyurtma bekor qilingani uchun %d so'm hamyoningizga qaytarildi.", order.RefundedCommission), data, order.RefundedCommission)
 	case order.TrialRestored:
 		s.notify(order.WorkerID, "wallet.refund", "Bepul ish qaytarildi",
 			"Buyurtma bekor qilingani uchun sarflangan bepul ishingiz qaytarildi.", data)

@@ -327,8 +327,10 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 		// The push says which stored row it is, so an app that is open and
 		// showing that row itself does not show the push as a second banner.
 		data := map[string]any{"type": "order.invite", "order_id": order.ID}
+		title, body := "Yangi buyurtma!", order.Description
 		if n != nil {
 			data["notification_id"] = n.ID
+			title, body = n.Title, n.Body
 		}
 
 		// Firebase first — it is the only transport that reaches a phone whose
@@ -341,15 +343,15 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 		// after its window is up is noise the worker cannot act on.
 		if s.fcm != nil {
 			if tok := s.store.GetDeviceToken(wuid); tok != "" {
-				go s.sendFCM(tok, s.store.GetPushChannel(wuid), "Yangi buyurtma!", order.Description, data, store.InviteTTL)
+				go s.sendFCM(tok, s.store.GetPushChannel(wuid), title, body, data, store.InviteTTL)
 				continue
 			}
 		}
 		if tok := s.store.GetPushToken(wuid); tok != "" {
 			m := push.Urgent(
 				tok,
-				"Yangi buyurtma!",
-				order.Description,
+				title,
+				body,
 				data,
 				int(store.InviteTTL.Seconds()),
 			)

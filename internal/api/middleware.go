@@ -64,7 +64,7 @@ func corsMW(allowedOrigins []string) func(http.Handler) http.Handler {
 				h.Set("Access-Control-Allow-Origin", origin)
 			}
 			h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
-			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Id")
+			h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Device-Id, X-App-Lang")
 			h.Set("Access-Control-Max-Age", "86400")
 			if r.Method == http.MethodOptions {
 				w.WriteHeader(http.StatusNoContent)
@@ -111,6 +111,11 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusTooManyRequests, "too_many_requests",
 				"too many requests — please slow down")
 			return
+		}
+		// The language the app is set to, so what the server writes to this
+		// account (pushes, the inbox) comes in it.
+		if lang := r.Header.Get("X-App-Lang"); lang != "" {
+			s.store.SetUserLang(u.ID, lang)
 		}
 		ctx := context.WithValue(r.Context(), userCtxKey, u)
 		next(w, r.WithContext(ctx))

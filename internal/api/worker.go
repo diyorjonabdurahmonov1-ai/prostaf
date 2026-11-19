@@ -204,7 +204,7 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 	s.notify(order.CustomerID, "order.accepted",
 		"Buyurtma qabul qilindi!",
 		wp.FullName+" buyurtmangizni qabul qildi. Telefon raqami: "+order.WorkerPhone,
-		map[string]any{"order_id": order.ID})
+		map[string]any{"order_id": order.ID}, wp.FullName, order.WorkerPhone)
 	// If that job was the last free one, say so now rather than letting the
 	// worker discover it when their phone goes quiet.
 	s.notifyTrialSpent(u.ID, wp.FreeOrdersLeft(), models.RoleWorker)

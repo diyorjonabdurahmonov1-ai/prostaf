@@ -789,7 +789,7 @@ func (s *Server) handleAdminExtendSubscription(w http.ResponseWriter, r *http.Re
 		s.notify(cp.UserID, "subscription.extended",
 			"Obuna faollashtirildi",
 			fmt.Sprintf("Hisobingiz %d oyga uzaytirildi. Amal qilish muddati: %s.", sub.Months, until),
-			map[string]any{"months": sub.Months, "until": until, "amount": sub.Amount})
+			map[string]any{"months": sub.Months, "until": until, "amount": sub.Amount}, sub.Months, until)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"subscription": sub, "company": cp})
 }

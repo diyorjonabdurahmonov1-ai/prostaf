@@ -29,10 +29,11 @@ import (
 // record stores a notification and pushes it down the socket as
 // `notification.new`, so an open app can drop it straight into the list without
 // re-reading it.
-func (s *Server) record(userID, kind, title, body string, data map[string]any) *models.Notification {
+func (s *Server) record(userID, kind, title, body string, data map[string]any, args ...any) *models.Notification {
 	if userID == "" {
 		return nil
 	}
+	title, body = localize(s.store.UserLang(userID), title, body, args)
 	payload := map[string]any{"type": kind}
 	for k, v := range data {
 		payload[k] = v
@@ -52,11 +53,13 @@ func (s *Server) record(userID, kind, title, body string, data map[string]any) *
 }
 
 // notify is record plus the push that wakes a closed app.
-func (s *Server) notify(userID, kind, title, body string, data map[string]any) *models.Notification {
-	n := s.record(userID, kind, title, body, data)
+func (s *Server) notify(userID, kind, title, body string, data map[string]any, args ...any) *models.Notification {
+	n := s.record(userID, kind, title, body, data, args...)
 	if n == nil {
 		return nil
 	}
+	// What was stored is what is rung: the same words, in the account's language.
+	title, body = n.Title, n.Body
 	payload, _ := n.Data.(map[string]any)
 	// Everyday messages get their own, gentler channel; only orders ring.
 	channel := s.store.GetPushChannel(userID)

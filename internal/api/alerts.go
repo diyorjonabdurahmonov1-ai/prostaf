@@ -42,13 +42,13 @@ func (s *Server) notifyTrialSpent(userID string, left int, role string) {
 			"Bepul buyurtmalar tugadi",
 			fmt.Sprintf("Siz %d ta bepul buyurtmani ishlatdingiz. Yangi buyurtma olish uchun oylik obunani rasmiylashtiring.",
 				s.store.FreeOrderLimit()),
-			map[string]any{"role": role})
+			map[string]any{"role": role}, s.store.FreeOrderLimit())
 	default:
 		s.notify(userID, "trial.exhausted",
 			"Bepul buyurtmalar tugadi",
 			fmt.Sprintf("Siz %d ta bepul buyurtmani ishlatdingiz. Yangi buyurtma olish uchun hisobingizni to'ldiring.",
 				s.store.FreeOrderLimit()),
-			map[string]any{"role": role})
+			map[string]any{"role": role}, s.store.FreeOrderLimit())
 	}
 }
 
