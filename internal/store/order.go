@@ -13,7 +13,7 @@ import (
 
 // InviteTTL is how long the search for a worker stays open before the order
 // auto-expires.
-const InviteTTL = 120 * time.Second
+const InviteTTL = 50 * time.Second
 
 // DispatchInterval is how often an open order re-broadcasts, picking up workers
 // who came online or finished a job after the first wave went out.

@@ -318,14 +318,18 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 		Data: map[string]any{"order": masked, "expires_at": order.InviteExpiresAt},
 	})
 
-	data := map[string]any{"type": "order.invite", "order_id": order.ID}
-
 	var pushMessages []push.Message
 	for _, wuid := range workerUserIDs {
 		// Stored, not notified: the push for this wave goes out below, and
 		// going through notify() would ring every worker twice for one job.
-		s.record(wuid, "order.invite", "Yangi buyurtma!", order.Description,
+		n := s.record(wuid, "order.invite", "Yangi buyurtma!", order.Description,
 			map[string]any{"order_id": order.ID})
+		// The push says which stored row it is, so an app that is open and
+		// showing that row itself does not show the push as a second banner.
+		data := map[string]any{"type": "order.invite", "order_id": order.ID}
+		if n != nil {
+			data["notification_id"] = n.ID
+		}
 
 		// Firebase first — it is the only transport that reaches a phone whose
 		// app is closed, which is most phones most of the time and precisely
@@ -334,7 +338,7 @@ func (s *Server) notifyInvited(order *models.Order, workerUserIDs []string) {
 		// hundred round trips.
 		//
 		// The TTL matches the search window either way: an invite that arrives
-		// after its two minutes are up is noise the worker cannot act on.
+		// after its window is up is noise the worker cannot act on.
 		if s.fcm != nil {
 			if tok := s.store.GetDeviceToken(wuid); tok != "" {
 				go s.sendFCM(tok, s.store.GetPushChannel(wuid), "Yangi buyurtma!", order.Description, data, store.InviteTTL)
