@@ -266,6 +266,11 @@ func (s *Server) companyRespond(w http.ResponseWriter, r *http.Request, accept b
 		if cp, ok := s.store.CompanyByUser(u.ID); ok && !cp.SubscriptionActive {
 			s.notifyTrialSpent(u.ID, cp.FreeOrdersLeft(), models.RoleCompany)
 		}
+		if s.store.OfflineCompanyIfUnable(u.ID) {
+			s.notify(u.ID, "worker.offline_auto",
+				"Bepul buyurtmalar tugadi — oflayn bo'ldingiz",
+				"Yangi buyurtma olish uchun oylik obunani rasmiylashtiring, so'ng yana onlayn bo'ling.", nil)
+		}
 	}
 	// Accepting reveals the number; declining leaves it hidden, which is the
 	// point of hiding it in the first place.

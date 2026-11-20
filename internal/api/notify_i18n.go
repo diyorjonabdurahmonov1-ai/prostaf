@@ -80,6 +80,14 @@ var notifyI18n = map[string]map[string]loc{
 		"ru": {"Бесплатные заказы закончились", "Вы использовали бесплатных заказов: %d. Чтобы получать новые заказы, оформите подписку или пополните счёт."},
 		"en": {"Free jobs are used up", "You have used %d free jobs. To keep receiving orders, buy a subscription or top up your balance."},
 	},
+	"Hisobingiz tugadi — oflayn bo'ldingiz": {
+		"ru": {"Средства закончились — вы офлайн", "Чтобы получать новые заказы, пополните счёт и снова выйдите онлайн."},
+		"en": {"Balance used up — you are offline", "Top up your balance to receive new orders, then go online again."},
+	},
+	"Bepul buyurtmalar tugadi — oflayn bo'ldingiz": {
+		"ru": {"Бесплатные заказы закончились — вы офлайн", "Чтобы получать новые заказы, оформите подписку и снова выйдите онлайн."},
+		"en": {"Free jobs are used up — you are offline", "Buy a subscription to receive new orders, then go online again."},
+	},
 	"Hisobingiz to'ldirildi": {
 		"ru": {"Счёт пополнен", "%s сум зачислено на ваш счёт."},
 		"en": {"Balance topped up", "%s so'm was added to your balance."},

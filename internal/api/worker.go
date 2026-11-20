@@ -208,6 +208,15 @@ func (s *Server) handleWorkerAccept(w http.ResponseWriter, r *http.Request) {
 	// If that job was the last free one, say so now rather than letting the
 	// worker discover it when their phone goes quiet.
 	s.notifyTrialSpent(u.ID, wp.FreeOrdersLeft(), models.RoleWorker)
+	// Nothing left to take the next one with — free jobs and balance both spent:
+	// the switch goes off now, rather than staying "online" for orders that will
+	// never come.
+	if s.store.OfflineWorkerIfUnable(u.ID) {
+		s.ws.ClearPresence(u.ID)
+		s.notify(u.ID, "worker.offline_auto",
+			"Hisobingiz tugadi — oflayn bo'ldingiz",
+			"Yangi buyurtma olish uchun hisobingizni to'ldiring, so'ng yana onlayn bo'ling.", nil)
+	}
 	// One place of a multi-worker request: this may have been the last one, and
 	// until it is, the worker waits without the customer's phone.
 	s.settleBatch(order)
