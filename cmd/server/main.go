@@ -72,6 +72,13 @@ func main() {
 		log.Printf("expired %d stale order search(es) left over from the last run", n)
 	}
 
+	// Workers and firms left "online" who could not take a job — no free jobs,
+	// no balance, no subscription — are set offline once, so their switch tells
+	// the truth. Going online is refused for them from now on.
+	if n := st.OfflineUnableProviders(); n > 0 {
+		log.Printf("set %d provider(s) offline: no free jobs, balance or subscription", n)
+	}
+
 	// A finished job's photos are deleted as it closes; this is the sweeper that
 	// covers what that cannot reach — the searches expired in bulk above, an
 	// order whose delete hit a full disk, and the whole backlog on the first run

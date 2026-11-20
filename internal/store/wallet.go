@@ -60,7 +60,24 @@ func (s *Store) walletCanAccept(workerUserID string) bool {
 	if w == nil {
 		return false
 	}
-	return w.Balance >= w.MinBalance || w.CreditLimit > 0
+	return walletOK(w.Balance, w.MinBalance, s.settings.CommissionFixed, w.CreditLimit)
+}
+
+// walletOK is the whole rule for "can this balance carry a job": enough for the
+// office's minimum *and* for the flat fee a job costs, or a credit line.
+//
+// The fee used to be a share of the price, so the minimum balance was the only
+// floor and a worker could never take a job they could not pay for. A flat fee
+// broke that quietly: with the minimum set low (a test top-up of 1 000 so'm and
+// a minimum of 1 000), a worker with 2 000 passed the check, was rung for every
+// order, and was charged 10 000 on accepting — ending below zero. The floor is
+// now the larger of the two.
+func walletOK(balance, minBalance, fixedFee, creditLimit int64) bool {
+	floor := minBalance
+	if fixedFee > floor {
+		floor = fixedFee
+	}
+	return balance >= floor || creditLimit > 0
 }
 
 // walletsCanAccept is walletCanAccept asked about a list of workers at once:
@@ -78,8 +95,8 @@ func (s *Store) walletsCanAccept(userIDs []string) map[string]bool {
 	}
 	rows, err := s.db.Query(
 		`SELECT user_id FROM wallets
-		 WHERE user_id = ANY($1) AND (balance >= min_balance OR credit_limit > 0)`,
-		userIDs)
+		 WHERE user_id = ANY($1) AND (balance >= GREATEST(min_balance, $2) OR credit_limit > 0)`,
+		userIDs, s.settings.CommissionFixed)
 	if err != nil {
 		log.Printf("store: wallet sweep failed, dispatching without it: %v", err)
 		for _, uid := range userIDs {
