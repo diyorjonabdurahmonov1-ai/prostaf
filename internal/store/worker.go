@@ -887,3 +887,26 @@ func (s *Store) OfflineUnableProviders() int {
 	}
 	return n
 }
+
+// OfflineWorkerIfUnable takes a worker offline when they can no longer accept a
+// job — the last free job or the last of the balance has just been spent — and
+// reports whether it did. Going online again is refused until they can take one.
+func (s *Store) OfflineWorkerIfUnable(userID string) bool {
+	wp, ok := s.GetWorkerByUser(userID)
+	if !ok || !wp.Online || s.canWorkerAccept(wp) {
+		return false
+	}
+	_, err := s.db.Exec("UPDATE workers SET online=FALSE WHERE user_id=$1", userID)
+	return err == nil
+}
+
+// OfflineCompanyIfUnable is the same for a firm: no free jobs left and no
+// subscription.
+func (s *Store) OfflineCompanyIfUnable(userID string) bool {
+	cp, ok := s.getCompanyByUser(userID)
+	if !ok || !cp.Online || cp.CanTakeWork() {
+		return false
+	}
+	_, err := s.db.Exec("UPDATE companies SET online=FALSE WHERE user_id=$1", userID)
+	return err == nil
+}
