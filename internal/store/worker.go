@@ -232,6 +232,11 @@ func (s *Store) SetWorkerStatus(userID string, online bool, lat, lng *float64) (
 	if online && len(wp.CategoryIDs) == 0 {
 		return nil, ErrNoCategories
 	}
+	// ...and being able to take what comes: a worker with no free jobs left and
+	// nothing in the wallet would be rung for orders they cannot accept.
+	if online && !s.canWorkerAccept(wp) {
+		return nil, ErrInsufficientBalance
+	}
 	wp.Online = online
 	if lat != nil {
 		wp.Lat = *lat
@@ -633,6 +638,11 @@ func (s *Store) SetCompanyStatus(userID string, online bool) (*models.CompanyPro
 	if !ok {
 		return nil, ErrNotFound
 	}
+	// A firm that could not take a job — no free jobs left and no subscription —
+	// stays off the list rather than being shown to customers it cannot serve.
+	if online && !cp.CanTakeWork() {
+		return nil, ErrSubscriptionExpired
+	}
 	cp.Online = online
 	s.db.Exec("UPDATE companies SET online=$1 WHERE user_id=$2", online, userID)
 	return cp, nil
@@ -837,4 +847,43 @@ func (s *Store) AdminUpdateCompany(companyID string, p CompanyPatch) (*models.Co
 	s.db.Exec(companyUpdateSQL+", phone=$16 WHERE id=$17",
 		append(companyUpdateArgs(cp), cp.Phone, cp.ID)...)
 	return cp, nil
+}
+
+// OfflineUnableProviders sets offline every online worker or firm that could not
+// accept a job right now, and returns how many it changed.
+func (s *Store) OfflineUnableProviders() int {
+	n := 0
+	rows, err := s.db.Query("SELECT " + workerCols + " FROM workers WHERE online=TRUE AND banned=FALSE")
+	if err == nil {
+		var broke []string
+		for rows.Next() {
+			wp, err := s.scanWorker(rows)
+			if err == nil && !s.canWorkerAccept(wp) {
+				broke = append(broke, wp.UserID)
+			}
+		}
+		rows.Close()
+		for _, uid := range broke {
+			if _, err := s.db.Exec("UPDATE workers SET online=FALSE WHERE user_id=$1", uid); err == nil {
+				n++
+			}
+		}
+	}
+	crows, err := s.db.Query("SELECT " + companyCols + " FROM companies WHERE online=TRUE AND banned=FALSE")
+	if err == nil {
+		var broke []string
+		for crows.Next() {
+			cp, err := s.scanCompany(crows)
+			if err == nil && !cp.CanTakeWork() {
+				broke = append(broke, cp.UserID)
+			}
+		}
+		crows.Close()
+		for _, uid := range broke {
+			if _, err := s.db.Exec("UPDATE companies SET online=FALSE WHERE user_id=$1", uid); err == nil {
+				n++
+			}
+		}
+	}
+	return n
 }

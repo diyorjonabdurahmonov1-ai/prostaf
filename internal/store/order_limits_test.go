@@ -70,3 +70,23 @@ func TestCommissionForFlatFeeOrPercent(t *testing.T) {
 		t.Fatalf("percent fallback: got %d", got)
 	}
 }
+
+func TestWalletOKNeedsTheFlatFeeToo(t *testing.T) {
+	cases := []struct {
+		balance, min, fee, credit int64
+		want                      bool
+	}{
+		{0, 10000, 10000, 0, false},
+		{2000, 1000, 10000, 0, false}, // the test top-up that slipped through
+		{9999, 10000, 10000, 0, false},
+		{10000, 10000, 10000, 0, true},
+		{15000, 20000, 10000, 0, false}, // office minimum above the fee still applies
+		{0, 0, 0, 0, true},              // no fee, no minimum: nothing to carry
+		{0, 10000, 10000, 50000, true},  // a credit line is allowed to go under
+	}
+	for i, c := range cases {
+		if got := walletOK(c.balance, c.min, c.fee, c.credit); got != c.want {
+			t.Errorf("case %d: walletOK(%d,%d,%d,%d) = %v, want %v", i, c.balance, c.min, c.fee, c.credit, got, c.want)
+		}
+	}
+}
