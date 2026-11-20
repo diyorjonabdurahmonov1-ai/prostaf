@@ -410,7 +410,9 @@ func (s *Store) SetDeviceToken(userID, token string) error {
 // (orders_v2) *and* the general one (general_v1). Naming general_v1 for a phone
 // that does not have it would file the message under "Miscellaneous", silent,
 // so it is only used for phones that said so.
-var pushChannels = map[string]bool{"orders": true, "orders_v2": true, "orders_v3": true}
+// "orders_v4" is the same handshake for the newer pair: orders_v4 (rings on the
+// alarm stream, so a phone on silent still rings) and general_v1.
+var pushChannels = map[string]bool{"orders": true, "orders_v2": true, "orders_v3": true, "orders_v4": true}
 
 // generalChannel is where everyday messages (a role change, an admin note, a
 // subscription) are rung: a soft chime, not the order ring.
@@ -436,6 +438,7 @@ func (s *Store) GetPushChannel(userID string) string {
 	if channel == "orders_v3" {
 		return "orders_v2"
 	}
+	// orders_v4 is both the handshake and the channel itself.
 	return channel
 }
 
@@ -445,7 +448,7 @@ func (s *Store) GetPushChannel(userID string) string {
 func (s *Store) GetGeneralChannel(userID string) string {
 	var channel string
 	s.db.QueryRow("SELECT push_channel FROM users WHERE id=$1", userID).Scan(&channel)
-	if channel == "orders_v3" {
+	if channel == "orders_v3" || channel == "orders_v4" {
 		return generalChannel
 	}
 	return s.GetPushChannel(userID)
